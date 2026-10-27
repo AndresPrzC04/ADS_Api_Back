@@ -1,91 +1,201 @@
 from datetime import date, datetime
-from typing import List, Optional
-from sqlalchemy import (
-    String, Integer, Boolean, Date, DateTime, Text, ForeignKey, func, and_
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship, foreign
-from app.core.database import Base
+from typing import List, Optional, Literal
+from sqlalchemy import Column, Text, and_
+from sqlalchemy.orm import foreign
+from sqlmodel import SQLModel, Field, Relationship
 
 
-class ArchivoAdjunto(Base):
+# =====================================================================
+# 1. ARCHIVO ADJUNTO (Tabla Polimórfica)
+# =====================================================================
+class ArchivoAdjuntoBase(SQLModel):
+    entidad_tipo: str = Field(max_length=50, index=True)  # 'BITACORA', 'GENERADOR', 'CALIDAD'
+    entidad_id: int = Field(index=True)
+    ruta_archivo: str = Field(max_length=500)
+    descripcion_pie_foto: Optional[str] = Field(default=None, max_length=300)
+
+
+class ArchivoAdjunto(ArchivoAdjuntoBase, table=True):
     __tablename__ = "archivos_adjunto"
 
-    id_archivo_adjunto: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    entidad_tipo: Mapped[str] = mapped_column(String(50), nullable=False)  # 'BITACORA', 'GENERADOR', 'CALIDAD'
-    entidad_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    ruta_archivo: Mapped[str] = mapped_column(String(500), nullable=False)
-    descripcion_pie_foto: Mapped[Optional[str]] = mapped_column(String(300))
-    fecha_carga: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id_archivo_adjunto: Optional[int] = Field(default=None, primary_key=True)
+    fecha_carga: datetime = Field(default_factory=datetime.utcnow)
 
 
-class BitacoraNota(Base):
+class ArchivoAdjuntoCreate(SQLModel):
+    entidad_tipo: Literal["BITACORA", "GENERADOR", "CALIDAD"]
+    entidad_id: int
+    ruta_archivo: str = Field(max_length=500)
+    descripcion_pie_foto: Optional[str] = Field(default=None, max_length=300)
+
+
+class ArchivoAdjuntoUpdate(SQLModel):
+    descripcion_pie_foto: Optional[str] = Field(default=None, max_length=300)
+
+
+class ArchivoAdjuntoPublic(ArchivoAdjuntoBase):
+    id_archivo_adjunto: int
+    fecha_carga: datetime
+
+
+# =====================================================================
+# 2. BITÁCORA NOTA (Inmutable / Append-Only)
+# =====================================================================
+class BitacoraNotaBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra", index=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario")
+    tipo_nota: str = Field(max_length=50)  # APERTURA, ORDEN, SOLICITUD, SEGUIMIENTO, CIERRE
+    asunto: str = Field(max_length=250)
+    descripcion: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class BitacoraNota(BitacoraNotaBase, table=True):
     __tablename__ = "bitacora_notas"
 
-    id_nota: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), nullable=False)
-    consecutivo_nota: Mapped[int] = mapped_column(Integer, nullable=False)
-    tipo_nota: Mapped[str] = mapped_column(String(50), nullable=False)  # APERTURA, ORDEN, SOLICITUD, SEGUIMIENTO, CIERRE
-    asunto: Mapped[str] = mapped_column(String(250), nullable=False)
-    descripcion: Mapped[str] = mapped_column(Text, nullable=False)
-    fecha_registro: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    
-    # Soporte para el método +firmar() del Diagrama de Clases UML
-    firmada: Mapped[bool] = mapped_column(Boolean, default=False)
-    sello_digital: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    id_nota: Optional[int] = Field(default=None, primary_key=True)
+    consecutivo_nota: int = Field(index=True)
+    fecha_registro: datetime = Field(default_factory=datetime.utcnow)
+    firmada: bool = Field(default=False)
+    sello_digital: Optional[str] = Field(default=None, max_length=255)
 
-    # Relación polimórfica de solo lectura hacia Archivos_adjunto
-    archivos_adjuntos: Mapped[List["ArchivoAdjunto"]] = relationship(
-        primaryjoin=lambda: and_(
-            BitacoraNota.id_nota == foreign(ArchivoAdjunto.entidad_id),
-            ArchivoAdjunto.entidad_tipo == "BITACORA"
-        ),
-        viewonly=True
+    # Relación polimórfica de solo lectura usando sa_relationship_kwargs
+    archivos_adjuntos: List[ArchivoAdjunto] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": lambda: and_(
+                BitacoraNota.id_nota == foreign(ArchivoAdjunto.entidad_id),
+                ArchivoAdjunto.entidad_tipo == "BITACORA"
+            ),
+            "viewonly": True
+        }
     )
 
 
-class ExpedienteDocumento(Base):
+class BitacoraNotaCreate(BitacoraNotaBase):
+    pass
+
+
+class BitacoraNotaFirma(SQLModel):
+    """Único esquema de actualización permitido: estampado de firma electrónica."""
+    sello_digital: str = Field(min_length=10, max_length=255)
+
+
+class BitacoraNotaPublic(BitacoraNotaBase):
+    id_nota: int
+    consecutivo_nota: int
+    fecha_registro: datetime
+    firmada: bool
+    sello_digital: Optional[str] = None
+    archivos_adjuntos: List[ArchivoAdjuntoPublic] = []
+
+
+# =====================================================================
+# 3. EXPEDIENTE DOCUMENTO (Repositorio Documental)
+# =====================================================================
+class ExpedienteDocumentoBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra", index=True)
+    fase: str = Field(max_length=100)  # 01_PRELIMINAR, 02_CONTRATACION, 03_EJECUCION, 04_CIERRE
+    nombre: str = Field(max_length=250)
+    version: int = Field(default=1, ge=1)
+    archivo_url: str = Field(max_length=500)
+    hash_sha256: str = Field(min_length=64, max_length=64)
+
+
+class ExpedienteDocumento(ExpedienteDocumentoBase, table=True):
     __tablename__ = "expediente_documentos"
 
-    id_documento: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    fase: Mapped[str] = mapped_column(String(100), nullable=False)  # PRELIMINAR, LICITACION, EJECUCION, CIERRE
-    nombre: Mapped[str] = mapped_column(String(250), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    archivo_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    hash_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    estatus: Mapped[str] = mapped_column(String(50), default="EN_REVISION")  # BORRADOR, EN_REVISION, APROBADO
-    fecha_subida: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id_documento: Optional[int] = Field(default=None, primary_key=True)
+    estatus: str = Field(default="EN_REVISION", max_length=50)
+    fecha_subida: datetime = Field(default_factory=datetime.utcnow)
 
 
-class ControlCalidadPrueba(Base):
+class ExpedienteDocumentoCreate(ExpedienteDocumentoBase):
+    pass
+
+
+class ExpedienteDocumentoUpdate(SQLModel):
+    estatus: Optional[str] = Field(default=None, max_length=50)
+    version: Optional[int] = Field(default=None, ge=1)
+    archivo_url: Optional[str] = Field(default=None, max_length=500)
+    hash_sha256: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+
+class ExpedienteDocumentoPublic(ExpedienteDocumentoBase):
+    id_documento: int
+    estatus: str
+    fecha_subida: datetime
+
+
+# =====================================================================
+# 4. CONTROL DE CALIDAD Y PRUEBAS DE LABORATORIO
+# =====================================================================
+class ControlCalidadPruebaBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra", index=True)
+    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto")
+    tipo_ensayo: str = Field(max_length=150)
+    fecha_muestreo: date
+    resultado_dictamen: str = Field(max_length=100)  # APROBADO, RECHAZADO, CONDICIONADO
+    url_reporte_laboratorio: str = Field(max_length=500)
+
+
+class ControlCalidadPrueba(ControlCalidadPruebaBase, table=True):
     __tablename__ = "control_calidad_pruebas"
 
-    id_prueba: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    id_concepto: Mapped[int] = mapped_column(ForeignKey("conceptos_catalogo.id_concepto"), nullable=False)
-    tipo_ensayo: Mapped[str] = mapped_column(String(150), nullable=False)
-    fecha_muestreo: Mapped[date] = mapped_column(Date, nullable=False)
-    resultado_dictamen: Mapped[str] = mapped_column(String(100), nullable=False)  # APROBADO, RECHAZADO, CONDICIONADO
-    url_reporte_laboratorio: Mapped[str] = mapped_column(String(500), nullable=False)
+    id_prueba: Optional[int] = Field(default=None, primary_key=True)
 
-    archivos_adjuntos: Mapped[List["ArchivoAdjunto"]] = relationship(
-        primaryjoin=lambda: and_(
-            ControlCalidadPrueba.id_prueba == foreign(ArchivoAdjunto.entidad_id),
-            ArchivoAdjunto.entidad_tipo == "CALIDAD"
-        ),
-        viewonly=True
+    archivos_adjuntos: List[ArchivoAdjunto] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": lambda: and_(
+                ControlCalidadPrueba.id_prueba == foreign(ArchivoAdjunto.entidad_id),
+                ArchivoAdjunto.entidad_tipo == "CALIDAD"
+            ),
+            "viewonly": True
+        }
     )
 
 
-class ReporteDiarioSupervision(Base):
+class ControlCalidadPruebaCreate(ControlCalidadPruebaBase):
+    pass
+
+
+class ControlCalidadPruebaUpdate(SQLModel):
+    resultado_dictamen: Optional[str] = Field(default=None, max_length=100)
+    url_reporte_laboratorio: Optional[str] = Field(default=None, max_length=500)
+
+
+class ControlCalidadPruebaPublic(ControlCalidadPruebaBase):
+    id_prueba: int
+    archivos_adjuntos: List[ArchivoAdjuntoPublic] = []
+
+
+# =====================================================================
+# 5. REPORTE DIARIO DE SUPERVISIÓN
+# =====================================================================
+class ReporteDiarioSupervisionBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra", index=True)
+    id_supervisor: int = Field(foreign_key="supervisor.id_supervisor")
+    fecha_reporte: date
+    clima: str = Field(max_length=100)
+    estado_fuerza_trabajo: int = Field(default=0, ge=0)
+    maquinaria_activa: Optional[str] = Field(default=None, sa_column=Column(Text))
+    incidencias_relevantes: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+
+class ReporteDiarioSupervision(ReporteDiarioSupervisionBase, table=True):
     __tablename__ = "reporte_diario_supervision"
 
-    id_reporte: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    id_supervisor: Mapped[int] = mapped_column(ForeignKey("supervisor.id_supervisor"), nullable=False)
-    fecha_reporte: Mapped[date] = mapped_column(Date, nullable=False)
-    clima: Mapped[str] = mapped_column(String(100), nullable=False)
-    estado_fuerza_trabajo: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    maquinaria_activa: Mapped[Optional[str]] = mapped_column(Text)
-    incidencias_relevantes: Mapped[Optional[str]] = mapped_column(Text)
+    id_reporte: Optional[int] = Field(default=None, primary_key=True)
+
+
+class ReporteDiarioSupervisionCreate(ReporteDiarioSupervisionBase):
+    pass
+
+
+class ReporteDiarioSupervisionUpdate(SQLModel):
+    clima: Optional[str] = Field(default=None, max_length=100)
+    estado_fuerza_trabajo: Optional[int] = Field(default=None, ge=0)
+    maquinaria_activa: Optional[str] = None
+    incidencias_relevantes: Optional[str] = None
+
+
+class ReporteDiarioSupervisionPublic(ReporteDiarioSupervisionBase):
+    id_reporte: int

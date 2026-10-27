@@ -1,113 +1,202 @@
 from datetime import date, datetime
 from typing import List, Optional
-from sqlalchemy import String, Integer, Boolean, Date, DateTime, ForeignKey, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.database import Base
+from pydantic import EmailStr
+from sqlmodel import SQLModel, Field, Relationship
 
 
-class RolUsuario(Base):
+# =====================================================================
+# 1. ROL DE USUARIO
+# =====================================================================
+class RolUsuarioBase(SQLModel):
+    nombre: str = Field(unique=True, index=True, max_length=50)
+    descripcion: Optional[str] = Field(default=None, max_length=255)
+
+
+class RolUsuario(RolUsuarioBase, table=True):
     __tablename__ = "rol_usuario"
 
-    id_rol_usuario: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    nombre: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
-    descripcion: Mapped[Optional[str]] = mapped_column(String(255))
+    id_rol_usuario: Optional[int] = Field(default=None, primary_key=True)
 
-    usuarios: Mapped[List["Usuario"]] = relationship(back_populates="rol")
+    # Relación inversa hacia Usuario
+    usuarios: List["Usuario"] = Relationship(back_populates="rol")
 
 
-class Usuario(Base):
+class RolUsuarioCreate(RolUsuarioBase):
+    pass
+
+
+class RolUsuarioUpdate(SQLModel):
+    nombre: Optional[str] = Field(default=None, max_length=50)
+    descripcion: Optional[str] = Field(default=None, max_length=255)
+
+
+class RolUsuarioPublic(RolUsuarioBase):
+    id_rol_usuario: int
+
+
+# =====================================================================
+# 2. USUARIO
+# =====================================================================
+class UsuarioBase(SQLModel):
+    nombre_usuario: str = Field(max_length=150)
+    correo: EmailStr = Field(unique=True, index=True, max_length=150)
+    id_rol_usuario: int = Field(foreign_key="rol_usuario.id_rol_usuario")
+    id_empresa_contratista: Optional[int] = Field(default=None)
+
+
+class Usuario(UsuarioBase, table=True):
     __tablename__ = "usuario"
 
-    id_usuario: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_rol_usuario: Mapped[int] = mapped_column(ForeignKey("rol_usuario.id_rol_usuario"), nullable=False)
-    id_empresa_contratista: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    nombre_usuario: Mapped[str] = mapped_column(String(150), nullable=False)
-    correo: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    fecha_registro: Mapped[date] = mapped_column(Date, default=func.current_date())
-    estado: Mapped[bool] = mapped_column(Boolean, default=True)
+    id_usuario: Optional[int] = Field(default=None, primary_key=True)
+    password_hash: str = Field(max_length=255)
+    fecha_registro: date = Field(default_factory=date.today)
+    estado: bool = Field(default=True)
 
-    # Relaciones hacia otras entidades del módulo
-    rol: Mapped["RolUsuario"] = relationship(back_populates="usuarios")
-    obras_asignadas: Mapped[List["UsuarioObra"]] = relationship(back_populates="usuario")
-    logs_auditoria: Mapped[List["AuditoriaLog"]] = relationship(back_populates="usuario")
+    # Relaciones nativas de SQLModel
+    rol: Optional[RolUsuario] = Relationship(back_populates="usuarios")
+    obras_asignadas: List["UsuarioObra"] = Relationship(back_populates="usuario")
+    logs_auditoria: List["AuditoriaLog"] = Relationship(back_populates="usuario")
 
-    # Relaciones hacia perfiles específicos (Bloque 05)
-    perfil_admin: Mapped[Optional["Administrador"]] = relationship(back_populates="usuario", uselist=False)
-    perfil_directivo: Mapped[Optional["Directivo"]] = relationship(back_populates="usuario", uselist=False)
-    perfil_superintendente: Mapped[Optional["Superintendente"]] = relationship(back_populates="usuario", uselist=False)
-    perfil_supervisor: Mapped[Optional["Supervisor"]] = relationship(back_populates="usuario", uselist=False)
-    perfil_residente: Mapped[Optional["Residente"]] = relationship(back_populates="usuario", uselist=False)
+    # Subperfiles especializados (Bloque 05)
+    perfil_admin: Optional["Administrador"] = Relationship(back_populates="usuario")
+    perfil_directivo: Optional["Directivo"] = Relationship(back_populates="usuario")
+    perfil_superintendente: Optional["Superintendente"] = Relationship(back_populates="usuario")
+    perfil_supervisor: Optional["Supervisor"] = Relationship(back_populates="usuario")
+    perfil_residente: Optional["Residente"] = Relationship(back_populates="usuario")
 
 
-class UsuarioObra(Base):
+class UsuarioCreate(UsuarioBase):
+    password: str = Field(min_length=8)
+    area_directivo: Optional[str] = None
+    zona_superintendente: Optional[str] = None
+    especialidad_supervisor: Optional[str] = None
+
+
+class UsuarioUpdate(SQLModel):
+    nombre_usuario: Optional[str] = Field(default=None, max_length=150)
+    correo: Optional[EmailStr] = None
+    id_rol_usuario: Optional[int] = None
+    id_empresa_contratista: Optional[int] = None
+    estado: Optional[bool] = None
+
+
+class UsuarioPublic(UsuarioBase):
+    id_usuario: int
+    fecha_registro: date
+    estado: bool
+    rol: Optional[RolUsuarioPublic] = None
+
+
+# =====================================================================
+# 3. ASIGNACIÓN USUARIO - OBRA (UsuarioObra)
+# =====================================================================
+class UsuarioObraBase(SQLModel):
+    id_obra: int = Field(primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", primary_key=True)
+
+
+class UsuarioObra(UsuarioObraBase, table=True):
     __tablename__ = "usuarios_obra"
 
-    id_obra: Mapped[int] = mapped_column(Integer, primary_key=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), primary_key=True)
-    fecha_alta: Mapped[date] = mapped_column(Date, default=func.current_date())
-    activo_en_obra: Mapped[bool] = mapped_column(Boolean, default=True)
+    fecha_alta: date = Field(default_factory=date.today)
+    activo_en_obra: bool = Field(default=True)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="obras_asignadas")
+    usuario: Optional[Usuario] = Relationship(back_populates="obras_asignadas")
 
 
-class AuditoriaLog(Base):
+class UsuarioObraCreate(UsuarioObraBase):
+    pass
+
+
+class UsuarioObraPublic(UsuarioObraBase):
+    fecha_alta: date
+    activo_en_obra: bool
+
+
+# =====================================================================
+# 4. AUDITORÍA LOG (Inmutable / Append-Only)
+# =====================================================================
+class AuditoriaLogBase(SQLModel):
+    id_usuario: int = Field(foreign_key="usuario.id_usuario")
+    id_obra: Optional[int] = Field(default=None)
+    rol_obra: Optional[str] = Field(default=None, max_length=50)
+    ip_origen: str = Field(default="127.0.0.1", max_length=45)
+    accion_ejecutada: str = Field(max_length=255)
+    tabla_afectada: str = Field(max_length=100)
+    registro_id: Optional[int] = Field(default=None)
+
+
+class AuditoriaLog(AuditoriaLogBase, table=True):
     __tablename__ = "auditoria_logs"
 
-    id_auditoria: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), nullable=False)
-    id_obra: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    rol_obra: Mapped[Optional[str]] = mapped_column(String(50))
-    ip_origen: Mapped[str] = mapped_column(String(45), default="127.0.0.1")
-    accion_ejecutada: Mapped[str] = mapped_column(String(255), nullable=False)
-    tabla_afectada: Mapped[str] = mapped_column(String(100), nullable=False)
-    registro_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    fecha_hora: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id_auditoria: Optional[int] = Field(default=None, primary_key=True)
+    fecha_hora: datetime = Field(default_factory=datetime.utcnow)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="logs_auditoria")
+    usuario: Optional[Usuario] = Relationship(back_populates="logs_auditoria")
 
 
-# --- Perfiles Especializados (Bloque 05) ---
+class AuditoriaLogCreate(AuditoriaLogBase):
+    pass
 
-class Administrador(Base):
+
+class AuditoriaLogPublic(AuditoriaLogBase):
+    id_auditoria: int
+    fecha_hora: datetime
+
+
+# =====================================================================
+# 5. SUBCLASES DE ROLES (Bloque 05)
+# =====================================================================
+class Administrador(SQLModel, table=True):
     __tablename__ = "administrador"
-    id_admin: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), unique=True)
-    nivel_acceso: Mapped[str] = mapped_column(String(50), default="TOTAL")
+    id_admin: Optional[int] = Field(default=None, primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
+    nivel_acceso: str = Field(default="TOTAL", max_length=50)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="perfil_admin")
+    usuario: Optional[Usuario] = Relationship(back_populates="perfil_admin")
 
 
-class Directivo(Base):
+class Directivo(SQLModel, table=True):
     __tablename__ = "directivo"
-    id_directivo: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), unique=True)
-    area: Mapped[str] = mapped_column(String(100))
+    id_directivo: Optional[int] = Field(default=None, primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
+    area: str = Field(max_length=100)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="perfil_directivo")
+    usuario: Optional[Usuario] = Relationship(back_populates="perfil_directivo")
 
 
-class Superintendente(Base):
+class Superintendente(SQLModel, table=True):
     __tablename__ = "superintendente"
-    id_superintendente: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), unique=True)
-    zona: Mapped[Optional[str]] = mapped_column(String(100))
+    id_superintendente: Optional[int] = Field(default=None, primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
+    zona: Optional[str] = Field(default=None, max_length=100)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="perfil_superintendente")
+    usuario: Optional[Usuario] = Relationship(back_populates="perfil_superintendente")
 
 
-class Supervisor(Base):
+class Supervisor(SQLModel, table=True):
     __tablename__ = "supervisor"
-    id_supervisor: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), unique=True)
-    especialidad: Mapped[str] = mapped_column(String(100))
+    id_supervisor: Optional[int] = Field(default=None, primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
+    especialidad: str = Field(max_length=100)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="perfil_supervisor")
+    usuario: Optional[Usuario] = Relationship(back_populates="perfil_supervisor")
 
 
-class Residente(Base):
+class Residente(SQLModel, table=True):
     __tablename__ = "residente"
-    id_residente: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(ForeignKey("usuario.id_usuario"), unique=True)
+    id_residente: Optional[int] = Field(default=None, primary_key=True)
+    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
 
-    usuario: Mapped["Usuario"] = relationship(back_populates="perfil_residente")
+    usuario: Optional[Usuario] = Relationship(back_populates="perfil_residente")
+
+
+# =====================================================================
+# 6. ESQUEMA DE TOKEN DE AUTENTICACIÓN (JWT)
+# =====================================================================
+class TokenResponse(SQLModel):
+    access_token: str
+    token_type: str = "bearer"
+    id_usuario: int
+    nombre_usuario: str
+    rol: str

@@ -1,143 +1,341 @@
 from datetime import date
 from decimal import Decimal
 from typing import List, Optional
-from sqlalchemy import String, Integer, Boolean, Date, Numeric, Text, ForeignKey, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.database import Base
+from pydantic import EmailStr
+from sqlalchemy import Column, Numeric, Text
+from sqlmodel import SQLModel, Field, Relationship
 
 
-class EmpresaContratista(Base):
+# =====================================================================
+# 1. EMPRESA CONTRATISTA
+# =====================================================================
+class EmpresaContratistaBase(SQLModel):
+    razon_social: str = Field(max_length=250)
+    rfc: str = Field(unique=True, index=True, min_length=12, max_length=13)
+    domicilio_fiscal: Optional[str] = Field(default=None, max_length=300)
+    representante_legal: str = Field(max_length=200)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    correo: EmailStr = Field(max_length=150)
+
+
+class EmpresaContratista(EmpresaContratistaBase, table=True):
     __tablename__ = "empresas_contratistas"
 
-    id_empresa_contratista: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    razon_social: Mapped[str] = mapped_column(String(250), nullable=False)
-    rfc: Mapped[str] = mapped_column(String(13), unique=True, nullable=False)
-    domicilio_fiscal: Mapped[Optional[str]] = mapped_column(String(300))
-    representante_legal: Mapped[str] = mapped_column(String(200), nullable=False)
-    telefono: Mapped[Optional[str]] = mapped_column(String(20))
-    correo: Mapped[str] = mapped_column(String(150), nullable=False)
-    fecha_registro: Mapped[date] = mapped_column(Date, default=func.current_date())
-    estado: Mapped[bool] = mapped_column(Boolean, default=True)
+    id_empresa_contratista: Optional[int] = Field(default=None, primary_key=True)
+    fecha_registro: date = Field(default_factory=date.today)
+    estado: bool = Field(default=True)
 
-    contratos: Mapped[List["Contrato"]] = relationship(back_populates="empresa")
+    contratos: List["Contrato"] = Relationship(back_populates="empresa")
 
 
-class Obra(Base):
+class EmpresaContratistaCreate(EmpresaContratistaBase):
+    pass
+
+
+class EmpresaContratistaUpdate(SQLModel):
+    razon_social: Optional[str] = Field(default=None, max_length=250)
+    domicilio_fiscal: Optional[str] = Field(default=None, max_length=300)
+    representante_legal: Optional[str] = Field(default=None, max_length=200)
+    telefono: Optional[str] = Field(default=None, max_length=20)
+    correo: Optional[EmailStr] = None
+    estado: Optional[bool] = None
+
+
+class EmpresaContratistaPublic(EmpresaContratistaBase):
+    id_empresa_contratista: int
+    fecha_registro: date
+    estado: bool
+
+
+# =====================================================================
+# 2. OBRA
+# =====================================================================
+class ObraBase(SQLModel):
+    num_contrato: str = Field(unique=True, index=True, max_length=100)
+    nombre: str = Field(max_length=300)
+    descripcion: Optional[str] = Field(default=None, sa_column=Column(Text))
+    fecha_inicio: date
+    fecha_fin: date
+
+
+class Obra(ObraBase, table=True):
     __tablename__ = "obras"
 
-    id_obra: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    num_contrato: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    nombre: Mapped[str] = mapped_column(String(300), nullable=False)
-    descripcion: Mapped[Optional[str]] = mapped_column(Text)
-    fecha_inicio: Mapped[date] = mapped_column(Date, nullable=False)
-    fecha_fin: Mapped[date] = mapped_column(Date, nullable=False)
-    estado: Mapped[str] = mapped_column(String(50), default="ACTIVA")
+    id_obra: Optional[int] = Field(default=None, primary_key=True)
+    estado: str = Field(default="ACTIVA", max_length=50)
 
-    contratos: Mapped[List["Contrato"]] = relationship(back_populates="obra", cascade="all, delete-orphan")
-    avances_fisicos: Mapped[List["AvanceFisico"]] = relationship(back_populates="obra", cascade="all, delete-orphan")
-    insumos: Mapped[List["Insumo"]] = relationship(back_populates="obra", cascade="all, delete-orphan")
-    conceptos: Mapped[List["ConceptoCatalogo"]] = relationship(back_populates="obra", cascade="all, delete-orphan")
-    programa_ejecucion: Mapped[List["ProgramaEjecucion"]] = relationship(back_populates="obra", cascade="all, delete-orphan")
+    contratos: List["Contrato"] = Relationship(back_populates="obra")
+    avances_fisicos: List["AvanceFisico"] = Relationship(back_populates="obra")
+    insumos: List["Insumo"] = Relationship(back_populates="obra")
+    conceptos: List["ConceptoCatalogo"] = Relationship(back_populates="obra")
+    programa_ejecucion: List["ProgramaEjecucion"] = Relationship(back_populates="obra")
 
 
-class Contrato(Base):
+class ObraCreate(ObraBase):
+    pass
+
+
+class ObraUpdate(SQLModel):
+    nombre: Optional[str] = Field(default=None, max_length=300)
+    descripcion: Optional[str] = None
+    fecha_inicio: Optional[date] = None
+    fecha_fin: Optional[date] = None
+    estado: Optional[str] = None
+
+
+class ObraPublic(ObraBase):
+    id_obra: int
+    estado: str
+
+
+# =====================================================================
+# 3. CONTRATO
+# =====================================================================
+class ContratoBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra")
+    id_empresa_contratista: int = Field(foreign_key="empresas_contratistas.id_empresa_contratista")
+    monto_contrato: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(16, 2), nullable=False)
+    )
+    archivo_contrato: str = Field(max_length=500)
+
+
+class Contrato(ContratoBase, table=True):
     __tablename__ = "contratos"
 
-    id_contrato: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    id_empresa_contratista: Mapped[int] = mapped_column(
-        ForeignKey("empresas_contratistas.id_empresa_contratista"), nullable=False
-    )
-    monto_contrato: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False)
-    archivo_contrato: Mapped[str] = mapped_column(String(500), nullable=False)
-    estado: Mapped[str] = mapped_column(String(50), default="BORRADOR")  # BORRADOR, VIGENTE, CERRADO
+    id_contrato: Optional[int] = Field(default=None, primary_key=True)
+    estado: str = Field(default="BORRADOR", max_length=50)
 
-    obra: Mapped["Obra"] = relationship(back_populates="contratos")
-    empresa: Mapped["EmpresaContratista"] = relationship(back_populates="contratos")
-    polizas: Mapped[List["Poliza"]] = relationship(back_populates="contrato", cascade="all, delete-orphan")
+    obra: Optional[Obra] = Relationship(back_populates="contratos")
+    empresa: Optional[EmpresaContratista] = Relationship(back_populates="contratos")
+    polizas: List["Poliza"] = Relationship(back_populates="contrato")
 
 
-class Poliza(Base):
+class ContratoCreate(ContratoBase):
+    pass
+
+
+class ContratoUpdate(SQLModel):
+    monto_contrato: Optional[Decimal] = None
+    archivo_contrato: Optional[str] = Field(default=None, max_length=500)
+    estado: Optional[str] = None
+
+
+class ContratoPublic(ContratoBase):
+    id_contrato: int
+    estado: str
+
+
+# =====================================================================
+# 4. PÓLIZA
+# =====================================================================
+class PolizaBase(SQLModel):
+    id_contrato: int = Field(foreign_key="contratos.id_contrato")
+    tipo_poliza: str = Field(max_length=100)
+    fecha_vencimiento: date
+    archivo_poliza: str = Field(max_length=500)
+
+
+class Poliza(PolizaBase, table=True):
     __tablename__ = "polizas"
 
-    id_poliza: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_contrato: Mapped[int] = mapped_column(ForeignKey("contratos.id_contrato"), nullable=False)
-    tipo_poliza: Mapped[str] = mapped_column(String(100), nullable=False)  # ANTICIPO, CUMPLIMIENTO, VICIOS_OCULTOS
-    fecha_vencimiento: Mapped[date] = mapped_column(Date, nullable=False)
-    archivo_poliza: Mapped[str] = mapped_column(String(500), nullable=False)
-
-    contrato: Mapped["Contrato"] = relationship(back_populates="polizas")
+    id_poliza: Optional[int] = Field(default=None, primary_key=True)
+    contrato: Optional[Contrato] = Relationship(back_populates="polizas")
 
 
-class AvanceFisico(Base):
+class PolizaCreate(PolizaBase):
+    pass
+
+
+class PolizaUpdate(SQLModel):
+    tipo_poliza: Optional[str] = Field(default=None, max_length=100)
+    fecha_vencimiento: Optional[date] = None
+    archivo_poliza: Optional[str] = Field(default=None, max_length=500)
+
+
+class PolizaPublic(PolizaBase):
+    id_poliza: int
+
+
+# =====================================================================
+# 5. AVANCE FÍSICO
+# =====================================================================
+class AvanceFisicoBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra")
+    fecha_corte: date
+    porcentaje_fisico: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(5, 2), nullable=False)
+    )
+
+
+class AvanceFisico(AvanceFisicoBase, table=True):
     __tablename__ = "avances_fisicos"
 
-    id_avance: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    fecha_corte: Mapped[date] = mapped_column(Date, nullable=False)
-    porcentaje_fisico: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
-
-    obra: Mapped["Obra"] = relationship(back_populates="avances_fisicos")
+    id_avance: Optional[int] = Field(default=None, primary_key=True)
+    obra: Optional[Obra] = Relationship(back_populates="avances_fisicos")
 
 
-class Insumo(Base):
+class AvanceFisicoCreate(AvanceFisicoBase):
+    pass
+
+
+class AvanceFisicoUpdate(SQLModel):
+    fecha_corte: Optional[date] = None
+    porcentaje_fisico: Optional[Decimal] = None
+
+
+class AvanceFisicoPublic(AvanceFisicoBase):
+    id_avance: int
+
+
+# =====================================================================
+# 6. INSUMO (Catálogo Maestro de Obra)
+# =====================================================================
+class InsumoBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra")
+    descripcion: str = Field(max_length=250)
+    tipo_insumo: str = Field(max_length=100)
+    unidad: str = Field(max_length=30)
+    cantidad_insumo: Decimal = Field(
+        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
+    )
+    costo_base: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+
+
+class Insumo(InsumoBase, table=True):
     __tablename__ = "insumos"
 
-    id_insumo: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    descripcion: Mapped[str] = mapped_column(String(250), nullable=False)
-    tipo_insumo: Mapped[str] = mapped_column(String(100), nullable=False)  # MATERIAL, MANO_OBRA, MAQUINARIA
-    unidad: Mapped[str] = mapped_column(String(30), nullable=False)
-    cantidad_insumo: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
-    costo_base: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    id_insumo: Optional[int] = Field(default=None, primary_key=True)
 
-    obra: Mapped["Obra"] = relationship(back_populates="insumos")
-    conceptos_elementos: Mapped[List["ConceptoElemento"]] = relationship(back_populates="insumo")
+    obra: Optional[Obra] = Relationship(back_populates="insumos")
+    conceptos_elementos: List["ConceptoElemento"] = Relationship(back_populates="insumo")
 
 
-class ConceptoCatalogo(Base):
+class InsumoCreate(InsumoBase):
+    pass
+
+
+class InsumoUpdate(SQLModel):
+    descripcion: Optional[str] = Field(default=None, max_length=250)
+    tipo_insumo: Optional[str] = Field(default=None, max_length=100)
+    unidad: Optional[str] = Field(default=None, max_length=30)
+    cantidad_insumo: Optional[Decimal] = None
+    costo_base: Optional[Decimal] = None
+
+
+class InsumoPublic(InsumoBase):
+    id_insumo: int
+
+
+# =====================================================================
+# 7. CONCEPTO CATÁLOGO (Presupuesto)
+# =====================================================================
+class ConceptoCatalogoBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra")
+    clave_concepto: str = Field(max_length=50)
+    descripcion: str = Field(sa_column=Column(Text, nullable=False))
+    precio_unitario: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+
+
+class ConceptoCatalogo(ConceptoCatalogoBase, table=True):
     __tablename__ = "conceptos_catalogo"
 
-    id_concepto: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    clave_concepto: Mapped[str] = mapped_column(String(50), nullable=False)
-    descripcion: Mapped[str] = mapped_column(Text, nullable=False)
-    precio_unitario: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
-    precio_bloqueado: Mapped[bool] = mapped_column(Boolean, default=False)
+    id_concepto: Optional[int] = Field(default=None, primary_key=True)
+    precio_bloqueado: bool = Field(default=False)
 
-    obra: Mapped["Obra"] = relationship(back_populates="conceptos")
-    elementos: Mapped[List["ConceptoElemento"]] = relationship(
-        back_populates="concepto", cascade="all, delete-orphan"
+    obra: Optional[Obra] = Relationship(back_populates="conceptos")
+    elementos: List["ConceptoElemento"] = Relationship(back_populates="concepto")
+    actividades_programa: List["ProgramaEjecucion"] = Relationship(back_populates="concepto")
+
+
+class ConceptoCatalogoCreate(ConceptoCatalogoBase):
+    pass
+
+
+class ConceptoCatalogoUpdate(SQLModel):
+    clave_concepto: Optional[str] = Field(default=None, max_length=50)
+    descripcion: Optional[str] = None
+    precio_unitario: Optional[Decimal] = None
+
+
+class ConceptoCatalogoPublic(ConceptoCatalogoBase):
+    id_concepto: int
+    precio_bloqueado: bool
+
+
+# =====================================================================
+# 8. CONCEPTO ELEMENTO (Desglose Insumo en Concepto)
+# =====================================================================
+class ConceptoElementoBase(SQLModel):
+    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto")
+    id_insumo: int = Field(foreign_key="insumos.id_insumo")
+    tipo: str = Field(max_length=100)
+    unidad: str = Field(max_length=30)
+    cantidad: Decimal = Field(
+        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
     )
-    actividades_programa: Mapped[List["ProgramaEjecucion"]] = relationship(
-        back_populates="concepto", cascade="all, delete-orphan"
+    costo_base: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
     )
 
 
-class ConceptoElemento(Base):
+class ConceptoElemento(ConceptoElementoBase, table=True):
     __tablename__ = "concepto_elementos"
 
-    id_concepto_insumos: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_concepto: Mapped[int] = mapped_column(ForeignKey("conceptos_catalogo.id_concepto"), nullable=False)
-    id_insumo: Mapped[int] = mapped_column(ForeignKey("insumos.id_insumo"), nullable=False)
-    tipo: Mapped[str] = mapped_column(String(100), nullable=False)
-    unidad: Mapped[str] = mapped_column(String(30), nullable=False)
-    cantidad: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
-    costo_base: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    id_concepto_insumos: Optional[int] = Field(default=None, primary_key=True)
 
-    concepto: Mapped["ConceptoCatalogo"] = relationship(back_populates="elementos")
-    insumo: Mapped["Insumo"] = relationship(back_populates="conceptos_elementos")
+    concepto: Optional[ConceptoCatalogo] = Relationship(back_populates="elementos")
+    insumo: Optional[Insumo] = Relationship(back_populates="conceptos_elementos")
 
 
-class ProgramaEjecucion(Base):
+class ConceptoElementoCreate(ConceptoElementoBase):
+    pass
+
+
+class ConceptoElementoUpdate(SQLModel):
+    cantidad: Optional[Decimal] = None
+    costo_base: Optional[Decimal] = None
+
+
+class ConceptoElementoPublic(ConceptoElementoBase):
+    id_concepto_insumos: int
+
+
+# =====================================================================
+# 9. PROGRAMA DE EJECUCIÓN (Cronograma / Gantt)
+# =====================================================================
+class ProgramaEjecucionBase(SQLModel):
+    id_obra: int = Field(foreign_key="obras.id_obra")
+    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto")
+    fecha_inicio_prog: date
+    fecha_fin_prog: date
+    cant_programada: Decimal = Field(
+        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
+    )
+
+
+class ProgramaEjecucion(ProgramaEjecucionBase, table=True):
     __tablename__ = "programa_ejecucion"
 
-    id_actividad: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    id_obra: Mapped[int] = mapped_column(ForeignKey("obras.id_obra"), nullable=False)
-    id_concepto: Mapped[int] = mapped_column(ForeignKey("conceptos_catalogo.id_concepto"), nullable=False)
-    fecha_inicio_prog: Mapped[date] = mapped_column(Date, nullable=False)
-    fecha_fin_prog: Mapped[date] = mapped_column(Date, nullable=False)
-    cant_programada: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    id_actividad: Optional[int] = Field(default=None, primary_key=True)
 
-    obra: Mapped["Obra"] = relationship(back_populates="programa_ejecucion")
-    concepto: Mapped["ConceptoCatalogo"] = relationship(back_populates="actividades_programa")
+    obra: Optional[Obra] = Relationship(back_populates="programa_ejecucion")
+    concepto: Optional[ConceptoCatalogo] = Relationship(back_populates="actividades_programa")
+
+
+class ProgramaEjecucionCreate(ProgramaEjecucionBase):
+    pass
+
+
+class ProgramaEjecucionUpdate(SQLModel):
+    fecha_inicio_prog: Optional[date] = None
+    fecha_fin_prog: Optional[date] = None
+    cant_programada: Optional[Decimal] = None
+
+
+class ProgramaEjecucionPublic(ProgramaEjecucionBase):
+    id_actividad: int

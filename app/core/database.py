@@ -1,27 +1,22 @@
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from typing import Generator
+from sqlmodel import SQLModel, create_engine, Session
 
-# URL de conexión a PostgreSQL (o SQLite local para pruebas rápidas)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "sqlite:///./obras_publicas_dev.db"  # Cambia a: "postgresql://usuario:password@localhost:5432/obras_db"
+    "postgresql://usuario:password@localhost:5432/obras_db"  # Cambiar a: "postgresql://usuario:password@localhost:5432/obras_db"
 )
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-
-engine = create_engine(DATABASE_URL, connect_args=connect_args, echo=False)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 
-class Base(DeclarativeBase):
-    pass
+def init_db() -> None:
+    """Crea todas las tablas declaradas en SQLModel."""
+    SQLModel.metadata.create_all(engine)
 
 
-def get_db():
-    """Dependencia que provee una sesión de base de datos por petición HTTP."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def get_session() -> Generator[Session, None, None]:
+    """Inyección de dependencias para proveer la sesión de base de datos."""
+    with Session(engine) as session:
+        yield session
