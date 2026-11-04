@@ -1,341 +1,264 @@
 from datetime import date
 from decimal import Decimal
 from typing import List, Optional
-from pydantic import EmailStr
-from sqlalchemy import Column, Numeric, Text
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import Field, SQLModel
 
 
 # =====================================================================
-# 1. EMPRESA CONTRATISTA
+# 1. EMPRESA CONTRATISTA (Tabla: Contratistas en 3NF)
 # =====================================================================
-class EmpresaContratistaBase(SQLModel):
-    razon_social: str = Field(max_length=250)
-    rfc: str = Field(unique=True, index=True, min_length=12, max_length=13)
-    domicilio_fiscal: Optional[str] = Field(default=None, max_length=300)
-    representante_legal: str = Field(max_length=200)
-    telefono: Optional[str] = Field(default=None, max_length=20)
-    correo: EmailStr = Field(max_length=150)
+class ContratistaCreate(SQLModel):
+    rfc: str = Field(min_length=12, max_length=13)
+    razon_social: str = Field(max_length=255)
 
 
-class EmpresaContratista(EmpresaContratistaBase, table=True):
-    __tablename__ = "empresas_contratistas"
-
-    id_empresa_contratista: Optional[int] = Field(default=None, primary_key=True)
-    fecha_registro: date = Field(default_factory=date.today)
-    estado: bool = Field(default=True)
-
-    contratos: List["Contrato"] = Relationship(back_populates="empresa")
+class ContratistaUpdate(SQLModel):
+    razon_social: Optional[str] = Field(default=None, max_length=255)
+    activo: Optional[bool] = None
 
 
-class EmpresaContratistaCreate(EmpresaContratistaBase):
-    pass
-
-
-class EmpresaContratistaUpdate(SQLModel):
-    razon_social: Optional[str] = Field(default=None, max_length=250)
-    domicilio_fiscal: Optional[str] = Field(default=None, max_length=300)
-    representante_legal: Optional[str] = Field(default=None, max_length=200)
-    telefono: Optional[str] = Field(default=None, max_length=20)
-    correo: Optional[EmailStr] = None
-    estado: Optional[bool] = None
-
-
-class EmpresaContratistaPublic(EmpresaContratistaBase):
-    id_empresa_contratista: int
-    fecha_registro: date
-    estado: bool
+class ContratistaPublic(SQLModel):
+    id_contratista: int
+    rfc: str
+    razon_social: str
+    activo: bool
 
 
 # =====================================================================
-# 2. OBRA
+# 2. OBRA PÚBLICA (RF-ADM-04)
 # =====================================================================
-class ObraBase(SQLModel):
-    num_contrato: str = Field(unique=True, index=True, max_length=100)
-    nombre: str = Field(max_length=300)
-    descripcion: Optional[str] = Field(default=None, sa_column=Column(Text))
+class ObraCreate(SQLModel):
+    nombre_obra: str = Field(max_length=255)
+    presupuesto_total: Decimal = Field(gt=0)
     fecha_inicio: date
     fecha_fin: date
 
 
-class Obra(ObraBase, table=True):
-    __tablename__ = "obras"
-
-    id_obra: Optional[int] = Field(default=None, primary_key=True)
-    estado: str = Field(default="ACTIVA", max_length=50)
-
-    contratos: List["Contrato"] = Relationship(back_populates="obra")
-    avances_fisicos: List["AvanceFisico"] = Relationship(back_populates="obra")
-    insumos: List["Insumo"] = Relationship(back_populates="obra")
-    conceptos: List["ConceptoCatalogo"] = Relationship(back_populates="obra")
-    programa_ejecucion: List["ProgramaEjecucion"] = Relationship(back_populates="obra")
-
-
-class ObraCreate(ObraBase):
-    pass
-
-
 class ObraUpdate(SQLModel):
-    nombre: Optional[str] = Field(default=None, max_length=300)
-    descripcion: Optional[str] = None
+    nombre_obra: Optional[str] = Field(default=None, max_length=255)
+    presupuesto_total: Optional[Decimal] = Field(default=None, gt=0)
     fecha_inicio: Optional[date] = None
     fecha_fin: Optional[date] = None
-    estado: Optional[str] = None
 
 
-class ObraPublic(ObraBase):
+class ObraPublic(SQLModel):
     id_obra: int
-    estado: str
+    id_estatus: int
+    clave_estatus: Optional[str] = None
+    nombre_obra: str
+    presupuesto_total: Decimal
+    fecha_inicio: date
+    fecha_fin: date
 
 
 # =====================================================================
-# 3. CONTRATO
+# 3. CONTRATO LEGAL Y PÓLIZAS DE FIANZA (RF-ADM-04)
 # =====================================================================
-class ContratoBase(SQLModel):
-    id_obra: int = Field(foreign_key="obras.id_obra")
-    id_empresa_contratista: int = Field(foreign_key="empresas_contratistas.id_empresa_contratista")
-    monto_contrato: Decimal = Field(
-        default=Decimal("0.00"), sa_column=Column(Numeric(16, 2), nullable=False)
-    )
-    archivo_contrato: str = Field(max_length=500)
-
-
-class Contrato(ContratoBase, table=True):
-    __tablename__ = "contratos"
-
-    id_contrato: Optional[int] = Field(default=None, primary_key=True)
-    estado: str = Field(default="BORRADOR", max_length=50)
-
-    obra: Optional[Obra] = Relationship(back_populates="contratos")
-    empresa: Optional[EmpresaContratista] = Relationship(back_populates="contratos")
-    polizas: List["Poliza"] = Relationship(back_populates="contrato")
-
-
-class ContratoCreate(ContratoBase):
-    pass
+class ContratoCreate(SQLModel):
+    id_obra: int
+    id_contratista: int
+    numero_contrato: str = Field(max_length=100)
+    monto_contrato: Decimal = Field(gt=0)
+    archivo_contrato: Optional[str] = Field(default=None, max_length=255)
 
 
 class ContratoUpdate(SQLModel):
-    monto_contrato: Optional[Decimal] = None
-    archivo_contrato: Optional[str] = Field(default=None, max_length=500)
-    estado: Optional[str] = None
+    id_contratista: Optional[int] = None
+    numero_contrato: Optional[str] = Field(default=None, max_length=100)
+    monto_contrato: Optional[Decimal] = Field(default=None, gt=0)
+    archivo_contrato: Optional[str] = Field(default=None, max_length=255)
 
 
-class ContratoPublic(ContratoBase):
+class ContratoPublic(SQLModel):
     id_contrato: int
-    estado: str
+    id_obra: int
+    id_contratista: int
+    id_estatus: int
+    numero_contrato: str
+    monto_contrato: Decimal
+    archivo_contrato: Optional[str] = None
 
 
-# =====================================================================
-# 4. PÓLIZA
-# =====================================================================
-class PolizaBase(SQLModel):
-    id_contrato: int = Field(foreign_key="contratos.id_contrato")
-    tipo_poliza: str = Field(max_length=100)
+class PolizaCreate(SQLModel):
+    id_contrato: int
+    id_tipo_poliza: int
+    numero_poliza: str = Field(max_length=100)
     fecha_vencimiento: date
-    archivo_poliza: str = Field(max_length=500)
-
-
-class Poliza(PolizaBase, table=True):
-    __tablename__ = "polizas"
-
-    id_poliza: Optional[int] = Field(default=None, primary_key=True)
-    contrato: Optional[Contrato] = Relationship(back_populates="polizas")
-
-
-class PolizaCreate(PolizaBase):
-    pass
+    archivo_poliza: str = Field(max_length=255)
 
 
 class PolizaUpdate(SQLModel):
-    tipo_poliza: Optional[str] = Field(default=None, max_length=100)
     fecha_vencimiento: Optional[date] = None
-    archivo_poliza: Optional[str] = Field(default=None, max_length=500)
+    archivo_poliza: Optional[str] = Field(default=None, max_length=255)
 
 
-class PolizaPublic(PolizaBase):
+class PolizaPublic(SQLModel):
     id_poliza: int
+    id_contrato: int
+    id_tipo_poliza: int
+    numero_poliza: str
+    fecha_vencimiento: date
+    archivo_poliza: str
 
 
 # =====================================================================
-# 5. AVANCE FÍSICO
+# 4. CATÁLOGO DE CONCEPTOS Y PRECIOS EXTRAORDINARIOS (RF-SUPT-01, RF-RES-04)
 # =====================================================================
-class AvanceFisicoBase(SQLModel):
-    id_obra: int = Field(foreign_key="obras.id_obra")
-    fecha_corte: date
-    porcentaje_fisico: Decimal = Field(
-        default=Decimal("0.00"), sa_column=Column(Numeric(5, 2), nullable=False)
-    )
-
-
-class AvanceFisico(AvanceFisicoBase, table=True):
-    __tablename__ = "avances_fisicos"
-
-    id_avance: Optional[int] = Field(default=None, primary_key=True)
-    obra: Optional[Obra] = Relationship(back_populates="avances_fisicos")
-
-
-class AvanceFisicoCreate(AvanceFisicoBase):
-    pass
-
-
-class AvanceFisicoUpdate(SQLModel):
-    fecha_corte: Optional[date] = None
-    porcentaje_fisico: Optional[Decimal] = None
-
-
-class AvanceFisicoPublic(AvanceFisicoBase):
-    id_avance: int
-
-
-# =====================================================================
-# 6. INSUMO (Catálogo Maestro de Obra)
-# =====================================================================
-class InsumoBase(SQLModel):
-    id_obra: int = Field(foreign_key="obras.id_obra")
-    descripcion: str = Field(max_length=250)
-    tipo_insumo: str = Field(max_length=100)
-    unidad: str = Field(max_length=30)
-    cantidad_insumo: Decimal = Field(
-        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
-    )
-    costo_base: Decimal = Field(
-        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
-    )
-
-
-class Insumo(InsumoBase, table=True):
-    __tablename__ = "insumos"
-
-    id_insumo: Optional[int] = Field(default=None, primary_key=True)
-
-    obra: Optional[Obra] = Relationship(back_populates="insumos")
-    conceptos_elementos: List["ConceptoElemento"] = Relationship(back_populates="insumo")
-
-
-class InsumoCreate(InsumoBase):
-    pass
-
-
-class InsumoUpdate(SQLModel):
-    descripcion: Optional[str] = Field(default=None, max_length=250)
-    tipo_insumo: Optional[str] = Field(default=None, max_length=100)
-    unidad: Optional[str] = Field(default=None, max_length=30)
-    cantidad_insumo: Optional[Decimal] = None
-    costo_base: Optional[Decimal] = None
-
-
-class InsumoPublic(InsumoBase):
-    id_insumo: int
-
-
-# =====================================================================
-# 7. CONCEPTO CATÁLOGO (Presupuesto)
-# =====================================================================
-class ConceptoCatalogoBase(SQLModel):
-    id_obra: int = Field(foreign_key="obras.id_obra")
-    clave_concepto: str = Field(max_length=50)
-    descripcion: str = Field(sa_column=Column(Text, nullable=False))
-    precio_unitario: Decimal = Field(
-        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
-    )
-
-
-class ConceptoCatalogo(ConceptoCatalogoBase, table=True):
-    __tablename__ = "conceptos_catalogo"
-
-    id_concepto: Optional[int] = Field(default=None, primary_key=True)
-    precio_bloqueado: bool = Field(default=False)
-
-    obra: Optional[Obra] = Relationship(back_populates="conceptos")
-    elementos: List["ConceptoElemento"] = Relationship(back_populates="concepto")
-    actividades_programa: List["ProgramaEjecucion"] = Relationship(back_populates="concepto")
-
-
-class ConceptoCatalogoCreate(ConceptoCatalogoBase):
-    pass
+class ConceptoCatalogoCreate(SQLModel):
+    id_obra: int
+    id_unidad: int
+    clave_concepto: str = Field(max_length=100)
+    descripcion: str
+    cantidad_presupuestada: Decimal = Field(ge=0)
+    precio_unitario: Decimal = Field(gt=0)
 
 
 class ConceptoCatalogoUpdate(SQLModel):
-    clave_concepto: Optional[str] = Field(default=None, max_length=50)
+    id_unidad: Optional[int] = None
+    clave_concepto: Optional[str] = Field(default=None, max_length=100)
     descripcion: Optional[str] = None
-    precio_unitario: Optional[Decimal] = None
+    cantidad_presupuestada: Optional[Decimal] = Field(default=None, ge=0)
+    precio_unitario: Optional[Decimal] = Field(default=None, gt=0)
 
 
-class ConceptoCatalogoPublic(ConceptoCatalogoBase):
+class ConceptoExtraordinarioInyeccion(SQLModel):
+    """RF-RES-04: Inyección de concepto extraordinario con dictamen APU y firma electrónica del Residente."""
+    id_obra: int
+    id_unidad: int
+    clave_concepto: str = Field(max_length=100)
+    descripcion: str
+    cantidad_presupuestada: Decimal = Field(gt=0)
+    precio_unitario: Decimal = Field(gt=0)
+    dictamen_apu_url: str = Field(max_length=255)
+    firma_electronica_residente: str = Field(min_length=6)
+
+
+class ConceptoCatalogoPublic(SQLModel):
     id_concepto: int
-    precio_bloqueado: bool
+    id_obra: int
+    id_tipo_concepto: int
+    id_unidad: int
+    clave_concepto: str
+    descripcion: str
+    cantidad_presupuestada: Decimal
+    cantidad_adicional_autorizada: Decimal
+    precio_unitario: Decimal
+    dictamen_apu_url: Optional[str] = None
+    autorizado_por_residente: bool
 
 
 # =====================================================================
-# 8. CONCEPTO ELEMENTO (Desglose Insumo en Concepto)
+# 5. PROGRAMA DE EJECUCIÓN Y RUTA CRÍTICA (RF-SUPT-02, RF-SUP-04)
 # =====================================================================
-class ConceptoElementoBase(SQLModel):
-    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto")
-    id_insumo: int = Field(foreign_key="insumos.id_insumo")
-    tipo: str = Field(max_length=100)
-    unidad: str = Field(max_length=30)
-    cantidad: Decimal = Field(
-        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
-    )
-    costo_base: Decimal = Field(
-        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
-    )
-
-
-class ConceptoElemento(ConceptoElementoBase, table=True):
-    __tablename__ = "concepto_elementos"
-
-    id_concepto_insumos: Optional[int] = Field(default=None, primary_key=True)
-
-    concepto: Optional[ConceptoCatalogo] = Relationship(back_populates="elementos")
-    insumo: Optional[Insumo] = Relationship(back_populates="conceptos_elementos")
-
-
-class ConceptoElementoCreate(ConceptoElementoBase):
-    pass
-
-
-class ConceptoElementoUpdate(SQLModel):
-    cantidad: Optional[Decimal] = None
-    costo_base: Optional[Decimal] = None
-
-
-class ConceptoElementoPublic(ConceptoElementoBase):
-    id_concepto_insumos: int
-
-
-# =====================================================================
-# 9. PROGRAMA DE EJECUCIÓN (Cronograma / Gantt)
-# =====================================================================
-class ProgramaEjecucionBase(SQLModel):
-    id_obra: int = Field(foreign_key="obras.id_obra")
-    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto")
+class ProgramaEjecucionCreate(SQLModel):
+    id_concepto: int
     fecha_inicio_prog: date
     fecha_fin_prog: date
-    cant_programada: Decimal = Field(
-        default=Decimal("0.0000"), sa_column=Column(Numeric(14, 4), nullable=False)
-    )
-
-
-class ProgramaEjecucion(ProgramaEjecucionBase, table=True):
-    __tablename__ = "programa_ejecucion"
-
-    id_actividad: Optional[int] = Field(default=None, primary_key=True)
-
-    obra: Optional[Obra] = Relationship(back_populates="programa_ejecucion")
-    concepto: Optional[ConceptoCatalogo] = Relationship(back_populates="actividades_programa")
-
-
-class ProgramaEjecucionCreate(ProgramaEjecucionBase):
-    pass
+    cant_programada: Decimal = Field(gt=0)
 
 
 class ProgramaEjecucionUpdate(SQLModel):
     fecha_inicio_prog: Optional[date] = None
     fecha_fin_prog: Optional[date] = None
-    cant_programada: Optional[Decimal] = None
+    cant_programada: Optional[Decimal] = Field(default=None, gt=0)
 
 
-class ProgramaEjecucionPublic(ProgramaEjecucionBase):
+class ProgramaEjecucionPublic(SQLModel):
     id_actividad: int
+    id_concepto: int
+    fecha_inicio_prog: date
+    fecha_fin_prog: date
+    cant_programada: Decimal
+
+
+class ActividadRutaCriticaPublic(SQLModel):
+    id_actividad: int
+    id_concepto: int
+    clave_concepto: str
+    descripcion_concepto: str
+    fecha_inicio_prog: date
+    fecha_fin_prog: date
+    cant_programada: Decimal
+    cant_aprobada_acumulada: Decimal
+    porcentaje_cumplimiento: Decimal
+    en_rojo_atraso: bool
+    estado_actividad: str
+
+
+# =====================================================================
+# 6. TABLERO DIRECTIVO, GANTT MACRO, REPORTES Y FINIQUITO (RF-DIR-01 a 04, RF-RES-05)
+# =====================================================================
+class AvanceFisicoCreate(SQLModel):
+    id_obra: int
+    fecha_corte: date = Field(default_factory=date.today)
+
+
+class AvanceFisicoPublic(SQLModel):
+    id_avance: int
+    id_obra: int
+    fecha_corte: date
+    porcentaje_fisico: Decimal
+    porcentaje_fisico_programado: Decimal
+    porcentaje_financiero_real: Decimal
+    porcentaje_financiero_programado: Decimal
+
+
+class DashboardObraItem(SQLModel):
+    id_obra: int
+    nombre_obra: str
+    estado_general: str
+    presupuesto_total: Decimal
+    monto_contrato: Decimal
+    avance_fisico_programado_pct: Decimal
+    avance_fisico_real_pct: Decimal
+    avance_financiero_programado_pct: Decimal
+    avance_financiero_real_pct: Decimal
+    cumple_candado_fisico_financiero: bool
+    alertas_plazo_revision: List[str] = []
+
+
+class GanttMacroItem(SQLModel):
+    id_obra: int
+    nombre_obra: str
+    numero_contrato: Optional[str] = None
+    fecha_inicio: date
+    fecha_fin: date
+    estado_general: str
+    avance_programado_pct: Decimal
+    avance_real_pct: Decimal
+    semaforo: str  # 'VERDE (EN_TIEMPO)', 'AMARILLO_ROJO (CON_ATRASO)', 'GRIS_ALERTA (SUSPENDIDA)'
+
+
+class ReporteGerencialFinanciero(SQLModel):
+    id_obra: int
+    nombre_obra: str
+    numero_contrato: Optional[str] = None
+    contratista: Optional[str] = None
+    presupuesto_total_contratado: Decimal
+    monto_bruto_estimado: Decimal
+    amortizacion_anticipo_descontada: Decimal
+    monto_neto_autorizado: Decimal
+    monto_efectivamente_liquidado: Decimal
+    saldo_pendiente_por_ejercer: Decimal
+    fecha_generacion: date
+
+
+class FiniquitoSolicitud(SQLModel):
+    firma_electronica_residente: str = Field(min_length=6)
+    observaciones_finiquito: Optional[str] = None
+
+
+class ActaFiniquitoResumen(SQLModel):
+    id_obra: int
+    nombre_obra: str
+    numero_contrato: str
+    estado_obra: str
+    estado_contrato: str
+    monto_original_contratado: Decimal
+    monto_ejercido_ordinario: Decimal
+    monto_ejercido_adicionales: Decimal
+    monto_ejercido_extraordinarios: Decimal
+    monto_total_ejercido: Decimal
+    total_anticipo_amortizado: Decimal
+    saldo_final_liquidado: Decimal
+    sello_digital_residente: str

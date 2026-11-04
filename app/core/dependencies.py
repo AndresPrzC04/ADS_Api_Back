@@ -1,91 +1,109 @@
+from datetime import date
 from typing import List
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
-from app.core.database import get_db
+from sqlmodel import Session, select
+from app.core.database import get_session
 from app.core.security import decode_access_token
-from app.modules.usuarios_accesos import models
+from app.models_base import ObrasAsignaciones, Usuarios
 
-# Configura el botón "Authorize" en Swagger UI apuntando al endpoint de login
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/usuarios-accesos/login")
 
 
 def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> models.Usuario:
-    """Valida el JWT y devuelve la instancia del Usuario autenticado y activo."""
+    session: Session = Depends(get_session)
+) -> Usuarios:
     payload = decode_access_token(token)
-    id_usuario: int = payload.get("sub")
-    if id_usuario is None:
+    id_usuario_str: str = str(payload.get("sub")) # Revisar
+    if not id_usuario_str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales de autenticación inválidas.",
+            detail="Credenciales de token inválidas.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    usuario = db.query(models.Usuario).filter(models.Usuario.id_usuario == int(id_usuario)).first()
+    usuario = session.get(Usuarios, int(id_usuario_str))
     if not usuario:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="El usuario no existe.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="El usuario asociado al token no existe.",
+        )
 
-    if not usuario.estado:
+    # RN-ADM-01.4: Bloqueo inmediato de sesión si el usuario pasa a estado inactivo
+    if not usuario.activo:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Su cuenta de usuario ha sido suspendida por el Administrador."
+            detail="RN-ADM-01.4: Su cuenta de usuario se encuentra suspendida o inhabilitada.",
         )
+
+    # RN-DIR-03.1: El rol DIRECTIVO solo tiene autorización para peticiones GET
+    nombre_rol = usuario.rol.nombre.upper() if usuario.rol else ""
+    if nombre_rol == "DIRECTIVO" and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="RN-DIR-03.1: El rol DIRECTIVO tiene acceso exclusivo de solo lectura (GET)."
+        )
+
     return usuario
 
 
 class RequerirRoles:
-    """
-    Dependencia parametrizable para restringir endpoints por Rol (RBAC).
-    Uso: Depends(RequerirRoles(["ADMINISTRADOR", "RESIDENTE"]))
-    """
     def __init__(self, roles_permitidos: List[str]):
         self.roles_permitidos = [r.upper() for r in roles_permitidos]
 
-    def __call__(self, current_user: models.Usuario = Depends(get_current_user)) -> models.Usuario:
+    def __call__(self, current_user: Usuarios = Depends(get_current_user)) -> Usuarios:
         nombre_rol = current_user.rol.nombre.upper() if current_user.rol else ""
         if nombre_rol not in self.roles_permitidos:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Acceso denegado. Rol actual '{nombre_rol}'. Se requiere uno de: {self.roles_permitidos}"
+                detail=f"Acceso denegado para el rol '{nombre_rol}'. Roles permitidos: {self.roles_permitidos}"
             )
         return current_user
 
 
-# Instancias listas para inyectar en los routers de cada módulo
 solo_admin = RequerirRoles(["ADMINISTRADOR"])
 solo_directivo_o_admin = RequerirRoles(["ADMINISTRADOR", "DIRECTIVO"])
-solo_superintendente = RequerirRoles(["SUPERINTENDENTE"])
-solo_supervisor = RequerirRoles(["SUPERVISOR"])
 solo_residente = RequerirRoles(["RESIDENTE"])
+solo_supervisor = RequerirRoles(["SUPERVISOR"])
+solo_superintendente = RequerirRoles(["SUPERINTENDENTE"])
 roles_operativos_obra = RequerirRoles(["RESIDENTE", "SUPERVISOR", "SUPERINTENDENTE"])
-todos_los_roles = RequerirRoles(["ADMINISTRADOR", "DIRECTIVO", "RESIDENTE", "SUPERVISOR", "SUPERINTENDENTE"])
 
 
 def verificar_participacion_en_obra(
     id_obra: int,
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(get_current_user)
-) -> models.Usuario:
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
+) -> Usuarios:
     """
-    Cumple RF-ADM-03: Verifica que Residente, Supervisor o Superintendente estén
-    activamente vinculados a la obra en la tabla UsuarioObra.
-    Administrador y Directivo tienen visibilidad global.
+    RN-ADM-03.1: Administrador y Directivo tienen visibilidad global.
+    Residente, Supervisor y Superintendente requieren asignación vigente en Obras_asignaciones.
     """
-    nombre_rol = current_user.rol.nombre.upper()
+    nombre_rol = current_user.rol.nombre.upper() if current_user.rol else ""
     if nombre_rol in ["ADMINISTRADOR", "DIRECTIVO"]:
         return current_user
 
-    asignacion = db.query(models.UsuarioObra).filter(
-        models.UsuarioObra.id_obra == id_obra,
-        models.UsuarioObra.id_usuario == current_user.id_usuario,
-        models.UsuarioObra.activo_en_obra == True
-    ).first()
+    hoy = date.today()
+    asignaciones = session.exec(
+        select(ObrasAsignaciones).where(
+            ObrasAsignaciones.id_obra == id_obra,
+            ObrasAsignaciones.id_usuario == current_user.id_usuario
+        )
+    ).all()
 
-    if not asignacion:
+    asignacion_vigente = next(
+        (
+            a for a in asignaciones
+            if a.fecha_inicio_asignacion <= hoy
+            and (a.fecha_fin_asignacion is None or a.fecha_fin_asignacion >= hoy)
+        ),
+        None
+    )
+
+    if not asignacion_vigente:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"No tienes una asignación activa en la obra con ID {id_obra}."
+            detail=f"RN-ADM-03.1: No tiene una asignación operativa vigente en la obra con ID {id_obra}."
         )
     return current_user

@@ -1,202 +1,166 @@
 from datetime import date, datetime
-from typing import List, Optional
+from typing import Optional
 from pydantic import EmailStr
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import Field, SQLModel
 
 
-# =====================================================================
-# 1. ROL DE USUARIO
-# =====================================================================
-class RolUsuarioBase(SQLModel):
-    nombre: str = Field(unique=True, index=True, max_length=50)
-    descripcion: Optional[str] = Field(default=None, max_length=255)
-
-
-class RolUsuario(RolUsuarioBase, table=True):
-    __tablename__ = "rol_usuario"
-
-    id_rol_usuario: Optional[int] = Field(default=None, primary_key=True)
-
-    # Relación inversa hacia Usuario
-    usuarios: List["Usuario"] = Relationship(back_populates="rol")
-
-
-class RolUsuarioCreate(RolUsuarioBase):
-    pass
-
-
-class RolUsuarioUpdate(SQLModel):
-    nombre: Optional[str] = Field(default=None, max_length=50)
-    descripcion: Optional[str] = Field(default=None, max_length=255)
-
-
-class RolUsuarioPublic(RolUsuarioBase):
+# ==========================================
+# 1. ESQUEMAS DE ROLES Y USUARIOS (RF-ADM-01, RF-ADM-02)
+# ==========================================
+class RolUsuarioPublic(SQLModel):
     id_rol_usuario: int
+    nombre: str
+    descripcion: Optional[str] = None
+    activo: bool
 
 
-# =====================================================================
-# 2. USUARIO
-# =====================================================================
-class UsuarioBase(SQLModel):
-    nombre_usuario: str = Field(max_length=150)
-    correo: EmailStr = Field(unique=True, index=True, max_length=150)
-    id_rol_usuario: int = Field(foreign_key="rol_usuario.id_rol_usuario")
-    id_empresa_contratista: Optional[int] = Field(default=None)
-
-
-class Usuario(UsuarioBase, table=True):
-    __tablename__ = "usuario"
-
-    id_usuario: Optional[int] = Field(default=None, primary_key=True)
-    password_hash: str = Field(max_length=255)
-    fecha_registro: date = Field(default_factory=date.today)
-    estado: bool = Field(default=True)
-
-    # Relaciones nativas de SQLModel
-    rol: Optional[RolUsuario] = Relationship(back_populates="usuarios")
-    obras_asignadas: List["UsuarioObra"] = Relationship(back_populates="usuario")
-    logs_auditoria: List["AuditoriaLog"] = Relationship(back_populates="usuario")
-
-    # Subperfiles especializados (Bloque 05)
-    perfil_admin: Optional["Administrador"] = Relationship(back_populates="usuario")
-    perfil_directivo: Optional["Directivo"] = Relationship(back_populates="usuario")
-    perfil_superintendente: Optional["Superintendente"] = Relationship(back_populates="usuario")
-    perfil_supervisor: Optional["Supervisor"] = Relationship(back_populates="usuario")
-    perfil_residente: Optional["Residente"] = Relationship(back_populates="usuario")
-
-
-class UsuarioCreate(UsuarioBase):
+class UsuarioCreate(SQLModel):
+    id_rol_usuario: int
+    nombre_completo: str = Field(max_length=255)
+    correo: EmailStr = Field(max_length=150)
     password: str = Field(min_length=8)
-    area_directivo: Optional[str] = None
-    zona_superintendente: Optional[str] = None
-    especialidad_supervisor: Optional[str] = None
+    firma_electronica: Optional[str] = Field(default=None, min_length=6, max_length=255)
 
 
 class UsuarioUpdate(SQLModel):
-    nombre_usuario: Optional[str] = Field(default=None, max_length=150)
-    correo: Optional[EmailStr] = None
+    nombre_completo: Optional[str] = Field(default=None, max_length=255)
+    correo: Optional[EmailStr] = Field(default=None, max_length=150)
+    password: Optional[str] = Field(default=None, min_length=8)
+    firma_electronica: Optional[str] = Field(default=None, min_length=6, max_length=255)
     id_rol_usuario: Optional[int] = None
-    id_empresa_contratista: Optional[int] = None
-    estado: Optional[bool] = None
 
 
-class UsuarioPublic(UsuarioBase):
+class UsuarioPublic(SQLModel):
     id_usuario: int
-    fecha_registro: date
-    estado: bool
+    id_rol_usuario: int
+    nombre_completo: str
+    correo: EmailStr
+    activo: bool
     rol: Optional[RolUsuarioPublic] = None
 
 
-# =====================================================================
-# 3. ASIGNACIÓN USUARIO - OBRA (UsuarioObra)
-# =====================================================================
-class UsuarioObraBase(SQLModel):
-    id_obra: int = Field(primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", primary_key=True)
-
-
-class UsuarioObra(UsuarioObraBase, table=True):
-    __tablename__ = "usuarios_obra"
-
-    fecha_alta: date = Field(default_factory=date.today)
-    activo_en_obra: bool = Field(default=True)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="obras_asignadas")
-
-
-class UsuarioObraCreate(UsuarioObraBase):
-    pass
-
-
-class UsuarioObraPublic(UsuarioObraBase):
-    fecha_alta: date
-    activo_en_obra: bool
-
-
-# =====================================================================
-# 4. AUDITORÍA LOG (Inmutable / Append-Only)
-# =====================================================================
-class AuditoriaLogBase(SQLModel):
-    id_usuario: int = Field(foreign_key="usuario.id_usuario")
-    id_obra: Optional[int] = Field(default=None)
-    rol_obra: Optional[str] = Field(default=None, max_length=50)
-    ip_origen: str = Field(default="127.0.0.1", max_length=45)
-    accion_ejecutada: str = Field(max_length=255)
-    tabla_afectada: str = Field(max_length=100)
-    registro_id: Optional[int] = Field(default=None)
-
-
-class AuditoriaLog(AuditoriaLogBase, table=True):
-    __tablename__ = "auditoria_logs"
-
-    id_auditoria: Optional[int] = Field(default=None, primary_key=True)
-    fecha_hora: datetime = Field(default_factory=datetime.utcnow)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="logs_auditoria")
-
-
-class AuditoriaLogCreate(AuditoriaLogBase):
-    pass
-
-
-class AuditoriaLogPublic(AuditoriaLogBase):
-    id_auditoria: int
-    fecha_hora: datetime
-
-
-# =====================================================================
-# 5. SUBCLASES DE ROLES (Bloque 05)
-# =====================================================================
-class Administrador(SQLModel, table=True):
-    __tablename__ = "administrador"
-    id_admin: Optional[int] = Field(default=None, primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
-    nivel_acceso: str = Field(default="TOTAL", max_length=50)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="perfil_admin")
-
-
-class Directivo(SQLModel, table=True):
-    __tablename__ = "directivo"
-    id_directivo: Optional[int] = Field(default=None, primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
-    area: str = Field(max_length=100)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="perfil_directivo")
-
-
-class Superintendente(SQLModel, table=True):
-    __tablename__ = "superintendente"
-    id_superintendente: Optional[int] = Field(default=None, primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
-    zona: Optional[str] = Field(default=None, max_length=100)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="perfil_superintendente")
-
-
-class Supervisor(SQLModel, table=True):
-    __tablename__ = "supervisor"
-    id_supervisor: Optional[int] = Field(default=None, primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
-    especialidad: str = Field(max_length=100)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="perfil_supervisor")
-
-
-class Residente(SQLModel, table=True):
-    __tablename__ = "residente"
-    id_residente: Optional[int] = Field(default=None, primary_key=True)
-    id_usuario: int = Field(foreign_key="usuario.id_usuario", unique=True)
-
-    usuario: Optional[Usuario] = Relationship(back_populates="perfil_residente")
-
-
-# =====================================================================
-# 6. ESQUEMA DE TOKEN DE AUTENTICACIÓN (JWT)
-# =====================================================================
 class TokenResponse(SQLModel):
     access_token: str
     token_type: str = "bearer"
+    expira_en_minutos: int = 20
     id_usuario: int
-    nombre_usuario: str
+    nombre_completo: str
+    correo: str
     rol: str
+
+
+# ==========================================
+# 2. ESQUEMAS DE ASIGNACIÓN Y RELEVO EN OBRAS (RF-ADM-03)
+# ==========================================
+class ObraAsignacionCreate(SQLModel):
+    id_obra: int
+    id_usuario: int
+    fecha_inicio_asignacion: date = Field(default_factory=date.today)
+    fecha_fin_asignacion: Optional[date] = None
+
+
+class RelevoOperativoCreate(SQLModel):
+    id_obra: int
+    id_usuario_saliente: int
+    id_usuario_entrante: int
+    fecha_relevo: date = Field(default_factory=date.today)
+
+
+class ObraAsignacionPublic(SQLModel):
+    id_asignacion: int
+    id_obra: int
+    id_usuario: int
+    fecha_inicio_asignacion: date
+    fecha_fin_asignacion: Optional[date] = None
+
+
+# ==========================================
+# 3. ESQUEMAS DE CATÁLOGOS MAESTROS (RF-ADM-05)
+# ==========================================
+class UnidadMedidaCreate(SQLModel):
+    clave: str = Field(max_length=20)
+    nombre: str = Field(max_length=100)
+
+
+class UnidadMedidaPublic(UnidadMedidaCreate):
+    id_unidad: int
+    activo: bool
+
+
+class TipoConceptoCreate(SQLModel):
+    clave: str = Field(max_length=30)
+    nombre: str = Field(max_length=100)
+    requiere_apu: bool = False
+
+
+class TipoConceptoPublic(TipoConceptoCreate):
+    id_tipo_concepto: int
+    activo: bool
+
+
+class TipoEstimacionCreate(SQLModel):
+    clave: str = Field(max_length=40)
+    nombre: str = Field(max_length=100)
+    descripcion: Optional[str] = None
+
+
+class TipoEstimacionPublic(TipoEstimacionCreate):
+    id_tipo_estimacion: int
+    activo: bool
+
+
+class TipoPolizaCreate(SQLModel):
+    clave: str = Field(max_length=50)
+    nombre: str = Field(max_length=100)
+
+
+class TipoPolizaPublic(TipoPolizaCreate):
+    id_tipo_poliza: int
+    activo: bool
+
+
+class EstatusCreate(SQLModel):
+    ambito: str = Field(max_length=30)
+    clave: str = Field(max_length=50)
+    nombre: str = Field(max_length=100)
+
+
+class EstatusPublic(EstatusCreate):
+    id_estatus: int
+    activo: bool
+
+
+class TipoNotaBitacoraCreate(SQLModel):
+    clave: str = Field(max_length=50)
+    nombre: str = Field(max_length=120)
+    id_rol_exclusivo: Optional[int] = None
+    min_imagenes: int = 0
+
+
+class TipoNotaBitacoraPublic(TipoNotaBitacoraCreate):
+    id_tipo_nota: int
+    activo: bool
+
+
+class TipoEnsayoCreate(SQLModel):
+    clave: str = Field(max_length=40)
+    nombre: str = Field(max_length=150)
+    norma_referencia: Optional[str] = Field(default=None, max_length=100)
+
+
+class TipoEnsayoPublic(TipoEnsayoCreate):
+    id_tipo_ensayo: int
+    activo: bool
+
+
+# ==========================================
+# 4. ESQUEMAS DE AUDITORÍA (RNF-SEG-03)
+# ==========================================
+class AuditoriaLogPublic(SQLModel):
+    id_log: int
+    id_obra: Optional[int] = None
+    id_usuario: int
+    id_accion: int
+    ip_origen: Optional[str] = None
+    fecha_inicio: datetime
+    fecha_cierre: datetime

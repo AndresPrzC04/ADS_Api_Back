@@ -1,158 +1,166 @@
 from typing import List
-from fastapi import APIRouter, Depends, status
-from sqlmodel import Session
+from fastapi import APIRouter, Depends, Request, status
+from sqlmodel import Session, select
 from app.core.database import get_session
 from app.core.dependencies import (
-    solo_admin,
-    solo_superintendente,
     RequerirRoles,
-    verificar_participacion_en_obra
+    get_current_user,
+    solo_admin,
+    solo_directivo_o_admin,
+    solo_residente,
+    verificar_participacion_en_obra,
+)
+from app.models_base import (
+    ConceptosCatalogo,
+    Contratos,
+    Polizas,
+    Usuarios,
 )
 from . import models, service
 
-router = APIRouter(prefix="/obras-contratos", tags=["02. Obras, Contratos, Catálogo e Insumos"])
+router = APIRouter(
+    prefix="/obras-contratos",
+    tags=["02. Obras, Contratos, Catálogo de Conceptos, Programa Gantt, Dashboard y Finiquito"]
+)
 
 
-# --- 1. Empresas Contratistas ---
-@router.post("/empresas", response_model=models.EmpresaContratistaPublic, status_code=status.HTTP_201_CREATED)
-def crear_empresa(
-    empresa_in: models.EmpresaContratistaCreate,
+# --- 1. Padrón de Empresas Contratistas (3NF) ---
+@router.post("/empresas", response_model=models.ContratistaPublic, status_code=status.HTTP_201_CREATED)
+def crear_empresa_contratista(
+    empresa_in: models.ContratistaCreate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.EmpresaContratistaService.crear(session, empresa_in)
+    return service.ContratistaService.crear(session, empresa_in)
 
 
-@router.get("/empresas", response_model=List[models.EmpresaContratistaPublic])
-def listar_empresas(
+@router.get("/empresas", response_model=List[models.ContratistaPublic])
+def listar_empresas_contratistas(
     skip: int = 0,
     limit: int = 100,
-    session: Session = Depends(get_session)
-):
-    return service.EmpresaContratistaService.consultar(session, skip=skip, limit=limit)
-
-
-@router.patch("/empresas/{id_empresa}/desactivar", response_model=models.EmpresaContratistaPublic)
-def desactivar_empresa(
-    id_empresa: int,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.EmpresaContratistaService.desactivar(session, id_empresa)
+    return service.ContratistaService.consultar(session, skip=skip, limit=limit)
 
 
-# --- 2. Obras y Avance Físico ---
+@router.patch("/empresas/{id_contratista}/desactivar", response_model=models.ContratistaPublic)
+def desactivar_empresa_contratista(
+    id_contratista: int,
+    session: Session = Depends(get_session),
+    admin: Usuarios = Depends(solo_admin)
+):
+    return service.ContratistaService.desactivar(session, id_contratista)
+
+
+# --- 2. Obras Públicas (RF-ADM-04) ---
 @router.post("/obras", response_model=models.ObraPublic, status_code=status.HTTP_201_CREATED)
-def crear_obra(
+def crear_obra_publica(
+    request: Request,
     obra_in: models.ObraCreate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.ObraService.crear(session, obra_in)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.ObraContratoService.crear_obra(session, obra_in, admin, ip)
 
 
 @router.get("/obras", response_model=List[models.ObraPublic])
 def listar_obras(
     skip: int = 0,
     limit: int = 100,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.ObraService.consultar(session, skip=skip, limit=limit)
+    return service.ObraContratoService.listar_obras_segun_rol(session, current_user, skip=skip, limit=limit)
 
 
 @router.get("/obras/{id_obra}", response_model=models.ObraPublic)
-def obtener_obra(
+def obtener_detalle_obra(
     id_obra: int,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.ObraService.obtener_por_id(session, id_obra)
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    obra = service.ObraContratoService.obtener_obra(session, id_obra)
+    return service.ObraContratoService._enriquecer_obra_public(session, obra)
 
 
 @router.patch("/obras/{id_obra}", response_model=models.ObraPublic)
 def actualizar_obra(
     id_obra: int,
+    request: Request,
     obra_in: models.ObraUpdate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.ObraService.actualizar(session, id_obra, obra_in)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.ObraContratoService.actualizar_obra(session, id_obra, obra_in, admin, ip)
 
 
-@router.patch("/obras/{id_obra}/cerrar", response_model=models.ObraPublic)
-def cerrar_obra(
-    id_obra: int,
-    session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
-):
-    return service.ObraService.cerrar(session, id_obra)
-
-
-@router.post("/avances-fisicos", response_model=models.AvanceFisicoPublic, status_code=status.HTTP_201_CREATED)
-def registrar_avance_fisico(
-    avance_in: models.AvanceFisicoCreate,
-    session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["RESIDENTE", "SUPERVISOR", "ADMINISTRADOR"]))
-):
-    verificar_participacion_en_obra(avance_in.id_obra, session, current_user)
-    return service.ObraService.registrar_avance_fisico(session, avance_in)
-
-
-# --- 3. Contratos y Pólizas ---
+# --- 3. Contratos y Pólizas de Fianza (RF-ADM-04, RF-DIR-03) ---
 @router.post("/contratos", response_model=models.ContratoPublic, status_code=status.HTTP_201_CREATED)
 def registrar_contrato(
+    request: Request,
     contrato_in: models.ContratoCreate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.ContratoService.registrar(session, contrato_in)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.ObraContratoService.registrar_contrato(session, contrato_in, admin, ip)
 
 
 @router.get("/obras/{id_obra}/contratos", response_model=List[models.ContratoPublic])
 def consultar_contratos_obra(
     id_obra: int,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.ContratoService.consultar_por_obra(session, id_obra)
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).all()
 
 
-@router.patch("/contratos/{id_contrato}/borrador", response_model=models.ContratoPublic)
-def actualizar_borrador_contrato(
+@router.patch("/contratos/{id_contrato}", response_model=models.ContratoPublic)
+def actualizar_contrato_en_configuracion(
     id_contrato: int,
     contrato_in: models.ContratoUpdate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.ContratoService.actualizar_borrador(session, id_contrato, contrato_in)
+    return service.ObraContratoService.actualizar_contrato(session, id_contrato, contrato_in, admin)
 
 
 @router.post("/polizas", response_model=models.PolizaPublic, status_code=status.HTTP_201_CREATED)
 def registrar_poliza(
+    request: Request,
     poliza_in: models.PolizaCreate,
     session: Session = Depends(get_session),
-    admin=Depends(solo_admin)
+    admin: Usuarios = Depends(solo_admin)
 ):
-    return service.ContratoService.registrar_poliza(session, poliza_in)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.ObraContratoService.registrar_poliza(session, poliza_in, admin, ip)
 
 
-# --- 4. Insumos y Catálogo de Conceptos ---
-@router.post("/insumos", response_model=models.InsumoPublic, status_code=status.HTTP_201_CREATED)
-def crear_insumo_obra(
-    insumo_in: models.InsumoCreate,
+@router.patch("/polizas/{id_poliza}", response_model=models.PolizaPublic)
+def actualizar_poliza_renovada(
+    id_poliza: int,
+    poliza_in: models.PolizaUpdate,
     session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+    admin: Usuarios = Depends(solo_admin)
 ):
-    verificar_participacion_en_obra(insumo_in.id_obra, session, current_user)
-    return service.CatalogoInsumoService.crear_insumo(session, insumo_in)
+    return service.ObraContratoService.actualizar_poliza_renovada(session, id_poliza, poliza_in, admin)
 
 
-@router.get("/obras/{id_obra}/insumos", response_model=List[models.InsumoPublic])
-def listar_insumos_obra(
-    id_obra: int,
-    session: Session = Depends(get_session)
+@router.get("/contratos/{id_contrato}/polizas", response_model=List[models.PolizaPublic])
+def listar_polizas_contrato(
+    id_contrato: int,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.CatalogoInsumoService.consultar_insumos_obra(session, id_obra)
+    return session.exec(select(Polizas).where(Polizas.id_contrato == id_contrato)).all()
 
 
+# --- 4. Catálogo de Conceptos y Precios Extraordinarios (RF-SUPT-01, RF-RES-04) ---
 @router.post(
     "/conceptos/importar-linea-base",
     response_model=List[models.ConceptoCatalogoPublic],
@@ -161,91 +169,141 @@ def listar_insumos_obra(
 def importar_conceptos_linea_base(
     conceptos_in: List[models.ConceptoCatalogoCreate],
     session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
 ):
     if conceptos_in:
         verificar_participacion_en_obra(conceptos_in[0].id_obra, session, current_user)
-    return service.CatalogoInsumoService.importar_linea_base(session, conceptos_in)
+    return service.CatalogoProgramaService.cargar_conceptos_ordinarios(session, conceptos_in)
 
 
 @router.get("/obras/{id_obra}/conceptos", response_model=List[models.ConceptoCatalogoPublic])
 def listar_conceptos_obra(
     id_obra: int,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.CatalogoInsumoService.consultar_conceptos_obra(session, id_obra)
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return session.exec(select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == id_obra)).all()
 
 
 @router.patch("/conceptos/{id_concepto}", response_model=models.ConceptoCatalogoPublic)
-def editar_concepto_antes_bloqueo(
+def editar_concepto_antes_de_congelamiento(
     id_concepto: int,
     concepto_in: models.ConceptoCatalogoUpdate,
     session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
 ):
-    return service.CatalogoInsumoService.editar_antes_del_bloqueo(session, id_concepto, concepto_in)
-
-
-@router.patch("/conceptos/{id_concepto}/bloquear-precio", response_model=models.ConceptoCatalogoPublic)
-def bloquear_precio_concepto(
-    id_concepto: int,
-    session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["RESIDENTE", "ADMINISTRADOR"]))
-):
-    return service.CatalogoInsumoService.bloquear_precio(session, id_concepto)
+    conc = session.get(ConceptosCatalogo, id_concepto)
+    if conc:
+        verificar_participacion_en_obra(conc.id_obra, session, current_user)
+    return service.CatalogoProgramaService.editar_concepto_ordinario(session, id_concepto, concepto_in)
 
 
 @router.post(
-    "/conceptos-elementos",
-    response_model=models.ConceptoElementoPublic,
+    "/conceptos/extraordinarios",
+    response_model=models.ConceptoCatalogoPublic,
     status_code=status.HTTP_201_CREATED
 )
-def vincular_insumo_a_concepto(
-    elemento_in: models.ConceptoElementoCreate,
+def inyectar_concepto_extraordinario(
+    request: Request,
+    inyeccion_in: models.ConceptoExtraordinarioInyeccion,
     session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+    residente: Usuarios = Depends(solo_residente)
 ):
-    return service.CatalogoInsumoService.crear_concepto_elemento(session, elemento_in)
+    verificar_participacion_en_obra(inyeccion_in.id_obra, session, residente)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.CatalogoProgramaService.inyectar_concepto_extraordinario(
+        session, inyeccion_in, residente, ip
+    )
 
 
-@router.patch("/conceptos-elementos/{id_concepto_insumos}", response_model=models.ConceptoElementoPublic)
-def actualizar_borrador_elemento(
-    id_concepto_insumos: int,
-    elemento_in: models.ConceptoElementoUpdate,
-    session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
-):
-    return service.CatalogoInsumoService.actualizar_borrador_elemento(session, id_concepto_insumos, elemento_in)
-
-
-# --- 5. Programa de Ejecución (Gantt) ---
+# --- 5. Programa de Ejecución Pactado y Ruta Crítica (RF-SUPT-02, RF-SUP-04) ---
 @router.post(
     "/programa-ejecucion",
     response_model=models.ProgramaEjecucionPublic,
     status_code=status.HTTP_201_CREATED
 )
-def crear_actividad_programa(
+def registrar_actividad_programa(
     prog_in: models.ProgramaEjecucionCreate,
     session: Session = Depends(get_session),
-    current_user=Depends(solo_superintendente)
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
 ):
-    verificar_participacion_en_obra(prog_in.id_obra, session, current_user)
-    return service.ProgramaEjecucionService.crear(session, prog_in)
+    conc = session.get(ConceptosCatalogo, prog_in.id_concepto)
+    if conc:
+        verificar_participacion_en_obra(conc.id_obra, session, current_user)
+    return service.CatalogoProgramaService.registrar_actividad_programa(session, prog_in)
 
 
 @router.get("/obras/{id_obra}/gantt", response_model=List[models.ProgramaEjecucionPublic])
 def consultar_gantt_obra(
     id_obra: int,
-    session: Session = Depends(get_session)
-):
-    return service.ProgramaEjecucionService.consultar_gantt(session, id_obra)
-
-
-@router.patch("/programa-ejecucion/{id_actividad}/recalendarizar", response_model=models.ProgramaEjecucionPublic)
-def recalendarizar_actividad(
-    id_actividad: int,
-    prog_in: models.ProgramaEjecucionUpdate,
     session: Session = Depends(get_session),
-    current_user=Depends(RequerirRoles(["RESIDENTE", "SUPERVISOR", "ADMINISTRADOR"]))
+    current_user: Usuarios = Depends(get_current_user)
 ):
-    return service.ProgramaEjecucionService.recalendarizar(session, id_actividad, prog_in)
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return service.CatalogoProgramaService.consultar_gantt_obra(session, id_obra)
+
+
+@router.get("/obras/{id_obra}/ruta-critica", response_model=List[models.ActividadRutaCriticaPublic])
+def monitorear_ruta_critica_obra(
+    id_obra: int,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERVISOR", "RESIDENTE", "DIRECTIVO", "ADMINISTRADOR"]))
+):
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return service.CatalogoProgramaService.monitorear_ruta_critica(session, id_obra)
+
+
+# --- 6. Tablero Directivo, Gantt Macro, Reportes y Finiquito (RF-DIR-01 a 04, RF-RES-05) ---
+@router.post("/avances-fisicos", response_model=models.AvanceFisicoPublic, status_code=status.HTTP_201_CREATED)
+def generar_corte_avance_obra(
+    avance_in: models.AvanceFisicoCreate,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERVISOR", "RESIDENTE", "ADMINISTRADOR"]))
+):
+    verificar_participacion_en_obra(avance_in.id_obra, session, current_user)
+    return service.DirectivoFiniquitoService.registrar_corte_avance(
+        session, avance_in.id_obra, avance_in.fecha_corte
+    )
+
+
+@router.get("/directivo/dashboard", response_model=List[models.DashboardObraItem])
+def obtener_dashboard_directivo(
+    session: Session = Depends(get_session),
+    directivo: Usuarios = Depends(solo_directivo_o_admin)
+):
+    return service.DirectivoFiniquitoService.obtener_dashboard_ejecutivo(session)
+
+
+@router.get("/directivo/calendario-ejecutivo", response_model=List[models.GanttMacroItem])
+def obtener_calendario_gantt_macro(
+    session: Session = Depends(get_session),
+    directivo: Usuarios = Depends(solo_directivo_o_admin)
+):
+    return service.DirectivoFiniquitoService.obtener_calendario_gantt_macro(session)
+
+
+@router.get("/directivo/obras/{id_obra}/reporte-financiero", response_model=models.ReporteGerencialFinanciero)
+def exportar_reporte_financiero_obra(
+    id_obra: int,
+    request: Request,
+    session: Session = Depends(get_session),
+    directivo: Usuarios = Depends(solo_directivo_o_admin)
+):
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.DirectivoFiniquitoService.exportar_reporte_financiero(session, id_obra, directivo, ip)
+
+
+@router.post("/obras/{id_obra}/finiquito", response_model=models.ActaFiniquitoResumen)
+def emitir_recepcion_fisica_y_finiquito(
+    id_obra: int,
+    request: Request,
+    solicitud: models.FiniquitoSolicitud,
+    session: Session = Depends(get_session),
+    residente: Usuarios = Depends(solo_residente)
+):
+    verificar_participacion_en_obra(id_obra, session, residente)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.DirectivoFiniquitoService.generar_recepcion_y_finiquito(
+        session, id_obra, solicitud, residente, ip
+    )
