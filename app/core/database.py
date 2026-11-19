@@ -13,7 +13,7 @@ engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 
 def init_db() -> None:
-    """Crea todas las tablas declaradas en SQLModel e inicializa los catálogos base."""
+    """Crea todas las tablas declaradas en SQLModel."""
     import app.models_base  # noqa: F401
     SQLModel.metadata.create_all(engine)
 
