@@ -27,7 +27,7 @@ from . import models, service
 
 router = APIRouter(
     prefix="/usuarios-accesos",
-    tags=["01. Administración: Usuarios, Roles, Asignaciones, Catálogos y Auditoría"]
+    tags=["01. Administración: Usuarios, Diccionario de Correos, Asignaciones, Catálogos y Auditoría"]
 )
 
 
@@ -39,7 +39,7 @@ def login_oauth2(
     session: Session = Depends(get_session)
 ):
     usuario = session.exec(
-        select(Usuarios).where(Usuarios.correo == form_data.username)
+        select(Usuarios).where(Usuarios.correo == form_data.username.strip().lower())
     ).first()
 
     if not usuario or not verify_password(form_data.password, usuario.password_hash):
@@ -88,7 +88,49 @@ def obtener_mi_perfil(current_user: Usuarios = Depends(get_current_user)):
     return current_user
 
 
-# --- 2. Gestión de Identidad y Ciclo de Vida (RF-ADM-01 y RF-ADM-02) ---
+# --- 2. Diccionario de Correos y Dominios Autorizados (RN-ADM-01.8 a RN-ADM-01.11) ---
+@router.post(
+    "/catalogos/correos-autorizados",
+    response_model=models.CorreoAutorizadoPublic,
+    status_code=status.HTTP_201_CREATED
+)
+def registrar_correo_o_dominio_autorizado(
+    request: Request,
+    entrada_in: models.CorreoAutorizadoCreate,
+    session: Session = Depends(get_session),
+    admin: Usuarios = Depends(solo_admin)
+):
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.DiccionarioCorreoService.registrar_entrada(session, entrada_in, admin, ip)
+
+
+@router.get("/catalogos/correos-autorizados", response_model=List[models.CorreoAutorizadoPublic])
+def listar_correos_autorizados(
+    id_contratista: Optional[int] = None,
+    solo_activos: bool = True,
+    session: Session = Depends(get_session),
+    admin: Usuarios = Depends(solo_admin)
+):
+    return service.DiccionarioCorreoService.listar_entradas(
+        session, id_contratista=id_contratista, solo_activos=solo_activos
+    )
+
+
+@router.patch(
+    "/catalogos/correos-autorizados/{id_correo_autorizado}/desactivar",
+    response_model=models.CorreoAutorizadoPublic
+)
+def desactivar_correo_autorizado(
+    id_correo_autorizado: int,
+    request: Request,
+    session: Session = Depends(get_session),
+    admin: Usuarios = Depends(solo_admin)
+):
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.DiccionarioCorreoService.desactivar_entrada(session, id_correo_autorizado, admin, ip)
+
+
+# --- 3. Gestión de Identidad y Ciclo de Vida (RF-ADM-01 y RF-ADM-02) ---
 @router.get("/roles", response_model=List[models.RolUsuarioPublic])
 def listar_roles(
     session: Session = Depends(get_session),
@@ -139,7 +181,7 @@ def suspender_usuario(
     return service.UsuarioService.suspender(session, id_usuario, admin, ip)
 
 
-# --- 3. Asignación de Proyectos y Relevos Operativos (RF-ADM-03) ---
+# --- 4. Asignación de Proyectos y Relevos Operativos (RF-ADM-03) ---
 @router.post(
     "/asignaciones",
     response_model=models.ObraAsignacionPublic,
@@ -193,7 +235,7 @@ def listar_asignaciones_por_obra(
     )
 
 
-# --- 4. Catálogos Maestros Institucionales en 3NF (RF-ADM-05 y RN-ADM-05.1) ---
+# --- 5. Catálogos Maestros Institucionales en 3NF (RF-ADM-05 y RN-ADM-05.1) ---
 @router.get("/catalogos/unidades-medida", response_model=List[models.UnidadMedidaPublic])
 def listar_unidades_medida(session: Session = Depends(get_session)):
     return list(session.exec(select(CatUnidadesMedida).where(col(CatUnidadesMedida.activo).is_(True))).all())
@@ -222,7 +264,6 @@ def desactivar_unidad_medida(
     session: Session = Depends(get_session),
     admin: Usuarios = Depends(solo_admin)
 ):
-    """RN-ADM-05.1: Baja lógica sin eliminación física para preservar integridad referencial."""
     unidad = session.get(CatUnidadesMedida, id_unidad)
     if not unidad:
         raise HTTPException(status_code=404, detail="Unidad de medida no encontrada.")
@@ -416,7 +457,7 @@ def listar_tipos_ensayo(session: Session = Depends(get_session)):
     return list(session.exec(select(CatTipoEnsayo).where(col(CatTipoEnsayo.activo).is_(True))).all())
 
 
-# --- 5. Consulta de Auditoría (RNF-SEG-03) ---
+# --- 6. Consulta de Auditoría (RNF-SEG-03) ---
 @router.get("/auditoria", response_model=List[models.AuditoriaLogPublic])
 def consultar_bitacora_auditoria(
     skip: int = 0,

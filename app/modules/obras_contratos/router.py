@@ -1,6 +1,6 @@
 from typing import List
 from fastapi import APIRouter, Depends, Request, status
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 from app.core.database import get_session
 from app.core.dependencies import (
     RequerirRoles,
@@ -11,6 +11,7 @@ from app.core.dependencies import (
     verificar_participacion_en_obra,
 )
 from app.models_base import (
+    AvancesFisicos,
     ConceptosCatalogo,
     Contratos,
     Polizas,
@@ -20,7 +21,7 @@ from . import models, service
 
 router = APIRouter(
     prefix="/obras-contratos",
-    tags=["02. Obras, Contratos, Catálogo de Conceptos, Programa Gantt, Dashboard y Finiquito"]
+    tags=["02. Obras, Contratos, Catálogo de Conceptos, Dashboard Directivo y Finiquito"]
 )
 
 
@@ -117,7 +118,7 @@ def consultar_contratos_obra(
     current_user: Usuarios = Depends(get_current_user)
 ):
     verificar_participacion_en_obra(id_obra, session, current_user)
-    return session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).all()
+    return list(session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).all())
 
 
 @router.patch("/contratos/{id_contrato}", response_model=models.ContratoPublic)
@@ -157,7 +158,7 @@ def listar_polizas_contrato(
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(get_current_user)
 ):
-    return session.exec(select(Polizas).where(Polizas.id_contrato == id_contrato)).all()
+    return list(session.exec(select(Polizas).where(Polizas.id_contrato == id_contrato)).all())
 
 
 # --- 4. Catálogo de Conceptos y Precios Extraordinarios (RF-SUPT-01, RF-RES-04) ---
@@ -173,7 +174,7 @@ def importar_conceptos_linea_base(
 ):
     if conceptos_in:
         verificar_participacion_en_obra(conceptos_in[0].id_obra, session, current_user)
-    return service.CatalogoProgramaService.cargar_conceptos_ordinarios(session, conceptos_in)
+    return service.CatalogoConceptosService.cargar_conceptos_ordinarios(session, conceptos_in)
 
 
 @router.get("/obras/{id_obra}/conceptos", response_model=List[models.ConceptoCatalogoPublic])
@@ -183,7 +184,7 @@ def listar_conceptos_obra(
     current_user: Usuarios = Depends(get_current_user)
 ):
     verificar_participacion_en_obra(id_obra, session, current_user)
-    return session.exec(select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == id_obra)).all()
+    return list(session.exec(select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == id_obra)).all())
 
 
 @router.patch("/conceptos/{id_concepto}", response_model=models.ConceptoCatalogoPublic)
@@ -196,7 +197,7 @@ def editar_concepto_antes_de_congelamiento(
     conc = session.get(ConceptosCatalogo, id_concepto)
     if conc:
         verificar_participacion_en_obra(conc.id_obra, session, current_user)
-    return service.CatalogoProgramaService.editar_concepto_ordinario(session, id_concepto, concepto_in)
+    return service.CatalogoConceptosService.editar_concepto_ordinario(session, id_concepto, concepto_in)
 
 
 @router.post(
@@ -212,58 +213,25 @@ def inyectar_concepto_extraordinario(
 ):
     verificar_participacion_en_obra(inyeccion_in.id_obra, session, residente)
     ip = request.client.host if request.client else "127.0.0.1"
-    return service.CatalogoProgramaService.inyectar_concepto_extraordinario(
+    return service.CatalogoConceptosService.inyectar_concepto_extraordinario(
         session, inyeccion_in, residente, ip
     )
 
 
-# --- 5. Programa de Ejecución Pactado y Ruta Crítica (RF-SUPT-02, RF-SUP-04) ---
-@router.post(
-    "/programa-ejecucion",
-    response_model=models.ProgramaEjecucionPublic,
-    status_code=status.HTTP_201_CREATED
-)
-def registrar_actividad_programa(
-    prog_in: models.ProgramaEjecucionCreate,
-    session: Session = Depends(get_session),
-    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
-):
-    conc = session.get(ConceptosCatalogo, prog_in.id_concepto)
-    if conc:
-        verificar_participacion_en_obra(conc.id_obra, session, current_user)
-    return service.CatalogoProgramaService.registrar_actividad_programa(session, prog_in)
-
-
-@router.get("/obras/{id_obra}/gantt", response_model=List[models.ProgramaEjecucionPublic])
-def consultar_gantt_obra(
+# --- 5. Historial de Avances Físicos, Dashboard Directivo, Reportes y Finiquito ---
+@router.get("/obras/{id_obra}/avances-fisicos", response_model=List[models.AvanceFisicoPublic])
+def consultar_historial_avances_obra(
     id_obra: int,
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(get_current_user)
 ):
     verificar_participacion_en_obra(id_obra, session, current_user)
-    return service.CatalogoProgramaService.consultar_gantt_obra(session, id_obra)
-
-
-@router.get("/obras/{id_obra}/ruta-critica", response_model=List[models.ActividadRutaCriticaPublic])
-def monitorear_ruta_critica_obra(
-    id_obra: int,
-    session: Session = Depends(get_session),
-    current_user: Usuarios = Depends(RequerirRoles(["SUPERVISOR", "RESIDENTE", "DIRECTIVO", "ADMINISTRADOR"]))
-):
-    verificar_participacion_en_obra(id_obra, session, current_user)
-    return service.CatalogoProgramaService.monitorear_ruta_critica(session, id_obra)
-
-
-# --- 6. Tablero Directivo, Gantt Macro, Reportes y Finiquito (RF-DIR-01 a 04, RF-RES-05) ---
-@router.post("/avances-fisicos", response_model=models.AvanceFisicoPublic, status_code=status.HTTP_201_CREATED)
-def generar_corte_avance_obra(
-    avance_in: models.AvanceFisicoCreate,
-    session: Session = Depends(get_session),
-    current_user: Usuarios = Depends(RequerirRoles(["SUPERVISOR", "RESIDENTE", "ADMINISTRADOR"]))
-):
-    verificar_participacion_en_obra(avance_in.id_obra, session, current_user)
-    return service.DirectivoFiniquitoService.registrar_corte_avance(
-        session, avance_in.id_obra, avance_in.fecha_corte
+    return list(
+        session.exec(
+            select(AvancesFisicos)
+            .where(AvancesFisicos.id_obra == id_obra)
+            .order_by(col(AvancesFisicos.id_avance).desc())
+        ).all()
     )
 
 
@@ -273,14 +241,6 @@ def obtener_dashboard_directivo(
     directivo: Usuarios = Depends(solo_directivo_o_admin)
 ):
     return service.DirectivoFiniquitoService.obtener_dashboard_ejecutivo(session)
-
-
-@router.get("/directivo/calendario-ejecutivo", response_model=List[models.GanttMacroItem])
-def obtener_calendario_gantt_macro(
-    session: Session = Depends(get_session),
-    directivo: Usuarios = Depends(solo_directivo_o_admin)
-):
-    return service.DirectivoFiniquitoService.obtener_calendario_gantt_macro(session)
 
 
 @router.get("/directivo/obras/{id_obra}/reporte-financiero", response_model=models.ReporteGerencialFinanciero)

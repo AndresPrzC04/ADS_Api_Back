@@ -12,28 +12,43 @@ connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite")
 engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 
+def init_db() -> None:
+    """Crea todas las tablas declaradas en SQLModel e inicializa los catálogos base."""
+    import app.models_base  # noqa: F401
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        seed_catalogos_base(session)
+
+
+def get_session() -> Generator[Session, None, None]:
+    """Inyección de dependencias para proveer la sesión de base de datos."""
+    with Session(engine) as session:
+        yield session
+
+
 def seed_catalogos_base(session: Session) -> None:
     """
-    Inicializa los 5 roles base (RF-ADM-02) y los catálogos maestros institucionales
-    (RF-ADM-05) si aún no existen en la base de datos.
+    Inicializa los 5 roles base (RF-ADM-02), el dominio institucional base en
+    Cat_Correos_Autorizados (RN-ADM-01.8) y los catálogos maestros (RF-ADM-05).
     """
     from app.models_base import (
-        RolUsuario,
+        CatCorreosAutorizados,
         CatEstatus,
-        CatUnidadesMedida,
         CatTipoConcepto,
-        CatTipoEstimacion,
-        CatTipoPoliza,
-        CatTipoNotaBitacora,
         CatTipoEnsayo,
+        CatTipoEstimacion,
+        CatTipoNotaBitacora,
+        CatTipoPoliza,
+        CatUnidadesMedida,
+        RolUsuario,
     )
 
     roles_base = [
-        ("ADMINISTRADOR", "Gestión de identidad, obras, contratos, pólizas y relevos operativos"),
-        ("DIRECTIVO", "Consulta ejecutiva global de tableros, Gantt y reportes en solo lectura"),
+        ("ADMINISTRADOR", "Gestión de identidad, diccionario de correos, obras, contratos, pólizas y relevos"),
+        ("DIRECTIVO", "Consulta ejecutiva global de tableros y reportes financieros en solo lectura"),
         ("RESIDENTE", "Representante gubernamental: apertura/cierre de bitácora, APU, autorización de pagos y finiquito"),
-        ("SUPERVISOR", "Validación de generadores, dictamen de estimaciones, control de calidad y reporte diario"),
-        ("SUPERINTENDENTE", "Representante del contratista: catálogo base, programa, generadores, estimaciones y CFDI"),
+        ("SUPERVISOR", "Reportes de supervisión con avance físico, dictamen de estimaciones y control de calidad"),
+        ("SUPERINTENDENTE", "Representante del contratista: catálogo base, estimaciones, bitácora y CFDI"),
     ]
     mapa_roles = {}
     for nombre, desc in roles_base:
@@ -43,6 +58,21 @@ def seed_catalogos_base(session: Session) -> None:
             session.add(rol)
             session.flush()
         mapa_roles[nombre] = rol.id_rol_usuario
+
+    # Dominio institucional base por defecto (RN-ADM-01.8)
+    dominios_institucionales = ["gob.mx", "obraspublicas.gob.mx"]
+    for dom in dominios_institucionales:
+        if not session.exec(
+            select(CatCorreosAutorizados).where(CatCorreosAutorizados.valor == dom)
+        ).first():
+            session.add(
+                CatCorreosAutorizados(
+                    id_contratista=None,
+                    tipo_registro="DOMINIO",
+                    valor=dom,
+                    activo=True
+                )
+            )
 
     estatus_base = [
         # Ámbito OBRA
@@ -124,19 +154,16 @@ def seed_catalogos_base(session: Session) -> None:
     id_sup = mapa_roles.get("SUPERVISOR")
     id_supt = mapa_roles.get("SUPERINTENDENTE")
     tipos_nota = [
-        # Exclusivas del Residente (RF-RES-01 y RF-RES-02)
         ("APERTURA", "Nota de Apertura de Bitácora", id_res, 0),
         ("ORDEN_TRABAJO", "Orden Técnica de Trabajo", id_res, 0),
         ("AUTORIZACION_ADICIONALES", "Autorización de Cantidades Adicionales", id_res, 0),
         ("SUSPENSION_TEMPORAL", "Notificación de Suspensión Temporal de Obra", id_res, 0),
         ("REANUDACION", "Notificación de Reanudación de Obra", id_res, 0),
         ("CIERRE", "Nota de Cierre Definitivo de Bitácora", id_res, 0),
-        # Exclusivas del Superintendente (RF-SUPT-05)
         ("SOLICITUD", "Solicitud de Autorización en Bitácora", id_supt, 0),
         ("INCIDENTE_OPERATIVO", "Registro de Incidente Operativo", id_supt, 0),
         ("RESPUESTA", "Nota de Respuesta del Contratista", id_supt, 0),
         ("AVISO_TERMINACION", "Aviso de Terminación de los Trabajos", id_supt, 6),
-        # Exclusivas del Supervisor (RF-SUP-03)
         ("SEGUIMIENTO", "Nota de Seguimiento de Avance Físico", id_sup, 0),
         ("INCIDENCIA_CAMPO", "Incidencia Detectada en Campo", id_sup, 0),
         ("ACUERDO_JUNTA", "Acuerdo Tomado en Junta de Trabajo", id_sup, 0),
@@ -166,17 +193,3 @@ def seed_catalogos_base(session: Session) -> None:
             )
 
     session.commit()
-
-
-def init_db() -> None:
-    """Crea todas las tablas declaradas en SQLModel e inicializa los catálogos base."""
-    import app.models_base  # noqa: F401
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        seed_catalogos_base(session)
-
-
-def get_session() -> Generator[Session, None, None]:
-    """Inyección de dependencias para proveer la sesión de base de datos."""
-    with Session(engine) as session:
-        yield session

@@ -148,59 +148,16 @@ class ConceptoCatalogoPublic(SQLModel):
 
 
 # =====================================================================
-# 5. PROGRAMA DE EJECUCIÓN Y RUTA CRÍTICA (RF-SUPT-02, RF-SUP-04)
+# 5. TABLERO DIRECTIVO, CORTES DE AVANCE, REPORTES Y FINIQUITO (RF-DIR-01, RF-DIR-04, RF-RES-05)
+# (Sin Gantt / Programa_ejecucion derogados)
 # =====================================================================
-class ProgramaEjecucionCreate(SQLModel):
-    id_concepto: int
-    fecha_inicio_prog: date
-    fecha_fin_prog: date
-    cant_programada: Decimal = Field(gt=0)
-
-
-class ProgramaEjecucionUpdate(SQLModel):
-    fecha_inicio_prog: Optional[date] = None
-    fecha_fin_prog: Optional[date] = None
-    cant_programada: Optional[Decimal] = Field(default=None, gt=0)
-
-
-class ProgramaEjecucionPublic(SQLModel):
-    id_actividad: int
-    id_concepto: int
-    fecha_inicio_prog: date
-    fecha_fin_prog: date
-    cant_programada: Decimal
-
-
-class ActividadRutaCriticaPublic(SQLModel):
-    id_actividad: int
-    id_concepto: int
-    clave_concepto: str
-    descripcion_concepto: str
-    fecha_inicio_prog: date
-    fecha_fin_prog: date
-    cant_programada: Decimal
-    cant_aprobada_acumulada: Decimal
-    porcentaje_cumplimiento: Decimal
-    en_rojo_atraso: bool
-    estado_actividad: str
-
-
-# =====================================================================
-# 6. TABLERO DIRECTIVO, GANTT MACRO, REPORTES Y FINIQUITO (RF-DIR-01 a 04, RF-RES-05)
-# =====================================================================
-class AvanceFisicoCreate(SQLModel):
-    id_obra: int
-    fecha_corte: date = Field(default_factory=date.today)
-
-
 class AvanceFisicoPublic(SQLModel):
     id_avance: int
     id_obra: int
+    id_reporte: Optional[int] = None
     fecha_corte: date
     porcentaje_fisico: Decimal
-    porcentaje_fisico_programado: Decimal
     porcentaje_financiero_real: Decimal
-    porcentaje_financiero_programado: Decimal
 
 
 class DashboardObraItem(SQLModel):
@@ -209,24 +166,12 @@ class DashboardObraItem(SQLModel):
     estado_general: str
     presupuesto_total: Decimal
     monto_contrato: Decimal
-    avance_fisico_programado_pct: Decimal
+    fecha_inicio: date
+    fecha_fin: date
     avance_fisico_real_pct: Decimal
-    avance_financiero_programado_pct: Decimal
     avance_financiero_real_pct: Decimal
     cumple_candado_fisico_financiero: bool
     alertas_plazo_revision: List[str] = []
-
-
-class GanttMacroItem(SQLModel):
-    id_obra: int
-    nombre_obra: str
-    numero_contrato: Optional[str] = None
-    fecha_inicio: date
-    fecha_fin: date
-    estado_general: str
-    avance_programado_pct: Decimal
-    avance_real_pct: Decimal
-    semaforo: str  # 'VERDE (EN_TIEMPO)', 'AMARILLO_ROJO (CON_ATRASO)', 'GRIS_ALERTA (SUSPENDIDA)'
 
 
 class ReporteGerencialFinanciero(SQLModel):
@@ -240,6 +185,8 @@ class ReporteGerencialFinanciero(SQLModel):
     monto_neto_autorizado: Decimal
     monto_efectivamente_liquidado: Decimal
     saldo_pendiente_por_ejercer: Decimal
+    avance_fisico_real_pct: Decimal
+    avance_financiero_real_pct: Decimal
     fecha_generacion: date
 
 

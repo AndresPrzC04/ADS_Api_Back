@@ -1,15 +1,15 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional, Literal
+from typing import List, Literal, Optional
 from sqlmodel import Field, SQLModel
 
 
 # =====================================================================
-# 1. EVIDENCIA FOTOGRÁFICA ADJUNTA (Tabla 3NF: Evidencia_adjunta)
+# 1. EVIDENCIA FOTOGRÁFICA ADJUNTA (Vinculada a Bitácora o a Reporte de Supervisión)
 # =====================================================================
 class EvidenciaAdjuntaCreate(SQLModel):
     id_nota: Optional[int] = None
-    id_generador: Optional[int] = None
+    id_reporte: Optional[int] = None
     ruta_archivo: str = Field(max_length=255)
     descripcion_pie_foto: Optional[str] = Field(default=None, max_length=255)
 
@@ -17,7 +17,7 @@ class EvidenciaAdjuntaCreate(SQLModel):
 class EvidenciaAdjuntaPublic(SQLModel):
     id_evidencia: int
     id_nota: Optional[int] = None
-    id_generador: Optional[int] = None
+    id_reporte: Optional[int] = None
     ruta_archivo: str
     descripcion_pie_foto: Optional[str] = None
     fecha_carga: datetime
@@ -28,10 +28,9 @@ class EvidenciaAdjuntaPublic(SQLModel):
 # =====================================================================
 class BitacoraNotaCreate(SQLModel):
     id_obra: int
-    clave_tipo_nota: str = Field(max_length=50)  # Ej: 'APERTURA', 'ORDEN_TRABAJO', 'SOLICITUD', 'AVISO_TERMINACION', 'CIERRE'
+    clave_tipo_nota: str = Field(max_length=50)
     asunto: str = Field(max_length=255)
     descripcion: str
-    # Campos opcionales para órdenes del Residente (RF-RES-02.1):
     id_concepto_adicional: Optional[int] = None
     cantidad_adicional_autorizada: Optional[Decimal] = Field(default=None, gt=0)
 
@@ -79,15 +78,30 @@ class ControlCalidadPruebaPublic(SQLModel):
 
 
 # =====================================================================
-# 4. REPORTE DIARIO DE SUPERVISIÓN (Tabla 3NF: Reporte_Diario_Supervision)
+# 4. REPORTE DIARIO DE SUPERVISIÓN CON CICLO BORRADOR -> ENVIADO -> FIRMADO (RF-SUP-03)
 # =====================================================================
 class ReporteDiarioSupervisionCreate(SQLModel):
+    """RN-SUP-03.4: Permite crear en estado BORRADOR con campos parciales / incompletos."""
     id_obra: int
     fecha_reporte: date = Field(default_factory=date.today)
-    clima: str = Field(max_length=100)
-    estado_fuerza_trabajo: int = Field(ge=0)
+    clima: Optional[str] = Field(default=None, max_length=100)
+    estado_fuerza_trabajo: Optional[int] = Field(default=0, ge=0)
     maquinaria_activa: Optional[str] = None
     incidencias_relevantes: Optional[str] = None
+    porcentaje_avance_reportado: Optional[Decimal] = Field(default=None, ge=0, le=100)
+
+
+class ReporteDiarioSupervisionUpdate(SQLModel):
+    """RN-SUP-03.4: Editable mientras se encuentre en BORRADOR o ENVIADO sin firma."""
+    clima: Optional[str] = Field(default=None, max_length=100)
+    estado_fuerza_trabajo: Optional[int] = Field(default=None, ge=0)
+    maquinaria_activa: Optional[str] = None
+    incidencias_relevantes: Optional[str] = None
+    porcentaje_avance_reportado: Optional[Decimal] = Field(default=None, ge=0, le=100)
+
+
+class ReporteDiarioFirmaInput(SQLModel):
+    firma_electronica_supervisor: str = Field(min_length=6)
 
 
 class ReporteDiarioSupervisionPublic(SQLModel):
@@ -95,7 +109,15 @@ class ReporteDiarioSupervisionPublic(SQLModel):
     id_obra: int
     id_supervisor: int
     fecha_reporte: date
-    clima: str
-    estado_fuerza_trabajo: int
+    estatus_reporte: str
+    clima: Optional[str] = None
+    estado_fuerza_trabajo: Optional[int] = None
     maquinaria_activa: Optional[str] = None
     incidencias_relevantes: Optional[str] = None
+    porcentaje_avance_reportado: Optional[Decimal] = None
+    firmado: bool
+    sello_digital: Optional[str] = None
+    fecha_envio: Optional[datetime] = None
+    fecha_firma: Optional[datetime] = None
+    evidencias: List[EvidenciaAdjuntaPublic] = []
+    advertencia_calidad: Optional[str] = None

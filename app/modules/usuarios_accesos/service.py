@@ -1,12 +1,14 @@
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, func, or_, select
 from app.core.security import get_password_hash
 from app.models_base import (
     AuditoriaLogs,
     BitacoraNotas,
+    CatCorreosAutorizados,
     CatEstatus,
+    Contratistas,
     Contratos,
     Estimaciones,
     Obras,
@@ -64,7 +66,177 @@ class AuditoriaService:
 
 
 # ==========================================
-# 2. SERVICIO DE GESTIÓN DE USUARIOS Y ROLES (RF-ADM-01 y RF-ADM-02)
+# 2. SERVICIO: DICCIONARIO DE CORREOS Y DOMINIOS AUTORIZADOS (RN-ADM-01.8 a RN-ADM-01.11)
+# ==========================================
+class DiccionarioCorreoService:
+    @staticmethod
+    def registrar_entrada(
+        session: Session,
+        entrada_in: models.CorreoAutorizadoCreate,
+        admin: Usuarios,
+        ip_origen: str
+    ) -> CatCorreosAutorizados:
+        valor_norm = entrada_in.valor.strip().lower().lstrip("@")
+        if entrada_in.tipo_registro == "CORREO" and "@" not in valor_norm:
+            raise HTTPException(
+                status_code=400,
+                detail="Si tipo_registro es 'CORREO', el valor debe ser una dirección de correo válida."
+            )
+        if entrada_in.tipo_registro == "DOMINIO" and "@" in valor_norm:
+            raise HTTPException(
+                status_code=400,
+                detail="Si tipo_registro es 'DOMINIO', indique únicamente el dominio (ej. 'gob.mx' o 'constructora.com')."
+            )
+
+        if entrada_in.id_contratista is not None:
+            contratista = session.get(Contratistas, entrada_in.id_contratista)
+            if not contratista or not contratista.activo:
+                raise HTTPException(status_code=404, detail="Empresa contratista no encontrada o inactiva.")
+
+        existente = session.exec(
+            select(CatCorreosAutorizados).where(CatCorreosAutorizados.valor == valor_norm)
+        ).first()
+        if existente:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El registro '{valor_norm}' ya existe en el diccionario de correos autorizados."
+            )
+
+        nuevo = CatCorreosAutorizados(
+            id_contratista=entrada_in.id_contratista,
+            tipo_registro=entrada_in.tipo_registro,
+            valor=valor_norm,
+            activo=True
+        )
+        session.add(nuevo)
+        session.commit()
+        session.refresh(nuevo)
+
+        AuditoriaService.registrar_evento(
+            session=session,
+            id_usuario=admin.id_usuario,
+            tipo_accion="SEGURIDAD",
+            accion_ejecutada=f"ALTA_CORREO_AUTORIZADO_{nuevo.id_correo_autorizado}",
+            descripcion=f"Registro en diccionario de correos: {valor_norm} ({entrada_in.tipo_registro})",
+            ip_origen=ip_origen
+        )
+        return nuevo
+
+    @staticmethod
+    def listar_entradas(
+        session: Session, id_contratista: Optional[int] = None, solo_activos: bool = True
+    ) -> List[CatCorreosAutorizados]:
+        stmt = select(CatCorreosAutorizados)
+        if solo_activos:
+            stmt = stmt.where(col(CatCorreosAutorizados.activo).is_(True))
+        if id_contratista is not None:
+            stmt = stmt.where(CatCorreosAutorizados.id_contratista == id_contratista)
+        return list(session.exec(stmt).all())
+
+    @staticmethod
+    def desactivar_entrada(
+        session: Session, id_correo_autorizado: int, admin: Usuarios, ip_origen: str
+    ) -> CatCorreosAutorizados:
+        entrada = session.get(CatCorreosAutorizados, id_correo_autorizado)
+        if not entrada:
+            raise HTTPException(status_code=404, detail="Entrada del diccionario de correos no encontrada.")
+        entrada.activo = False
+        session.add(entrada)
+        session.commit()
+        session.refresh(entrada)
+
+        AuditoriaService.registrar_evento(
+            session=session,
+            id_usuario=admin.id_usuario,
+            tipo_accion="SEGURIDAD",
+            accion_ejecutada=f"BAJA_CORREO_AUTORIZADO_{id_correo_autorizado}",
+            descripcion=f"Baja lógica de registro en diccionario de correos: {entrada.valor}",
+            ip_origen=ip_origen
+        )
+        return entrada
+
+    @staticmethod
+    def validar_correo_para_rol(session: Session, correo: str, nombre_rol: str) -> None:
+        """
+        RN-ADM-01.8, RN-ADM-01.9, RN-ADM-01.10 y RN-ADM-01.11:
+        - Roles internos (ADMINISTRADOR, DIRECTIVO, RESIDENTE, SUPERVISOR):
+          El correo o su dominio debe estar activo en Cat_Correos_Autorizados con id_contratista IS NULL.
+        - Rol SUPERINTENDENTE:
+          El correo o su dominio debe estar activo en Cat_Correos_Autorizados vinculado a una empresa
+          contratista que tenga al menos un contrato activo (VIGENTE) en Contratos.
+        """
+        correo_norm = correo.strip().lower()
+        dominio = correo_norm.split("@")[-1] if "@" in correo_norm else ""
+        rol_upper = nombre_rol.upper()
+
+        if rol_upper == "SUPERINTENDENTE":
+            coincidencias = list(
+                session.exec(
+                    select(CatCorreosAutorizados).where(
+                        col(CatCorreosAutorizados.activo).is_(True),
+                        col(CatCorreosAutorizados.id_contratista).is_not(None),
+                        or_(
+                            CatCorreosAutorizados.valor == correo_norm,
+                            CatCorreosAutorizados.valor == dominio,
+                        ),
+                    )
+                ).all()
+            )
+            if not coincidencias:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El correo proporcionado no pertenece al diccionario de correos autorizados de ninguna empresa contratista registrada"
+                )
+
+            # RN-ADM-01.11: Verificar que la contratista tenga al menos un contrato activo (VIGENTE)
+            est_vigente = session.exec(
+                select(CatEstatus).where(CatEstatus.ambito == "CONTRATO", CatEstatus.clave == "VIGENTE")
+            ).first()
+            tiene_contrato_activo = False
+            for c in coincidencias:
+                if c.id_contratista is not None and est_vigente:
+                    contrato_activo = session.exec(
+                        select(Contratos).where(
+                            Contratos.id_contratista == c.id_contratista,
+                            Contratos.id_estatus == est_vigente.id_estatus
+                        )
+                    ).first()
+                    if contrato_activo:
+                        tiene_contrato_activo = True
+                        break
+
+            if not tiene_contrato_activo:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "RN-ADM-01.11: La empresa contratista asociada a este correo no cuenta con un contrato "
+                        "activo/vigente; no se pueden dar de alta nuevas cuentas operativas."
+                    )
+                )
+        else:
+            # Roles internos: ADMINISTRADOR, DIRECTIVO, RESIDENTE, SUPERVISOR (RN-ADM-01.8)
+            coincidencia_inst = session.exec(
+                select(CatCorreosAutorizados).where(
+                    col(CatCorreosAutorizados.activo).is_(True),
+                    col(CatCorreosAutorizados.id_contratista).is_(None),
+                    or_(
+                        CatCorreosAutorizados.valor == correo_norm,
+                        CatCorreosAutorizados.valor == dominio,
+                    ),
+                )
+            ).first()
+            if not coincidencia_inst:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"RN-ADM-01.8: El correo '{correo_norm}' no pertenece a ningún dominio o correo "
+                        f"institucional autorizado para el rol {rol_upper}."
+                    )
+                )
+
+
+# ==========================================
+# 3. SERVICIO DE GESTIÓN DE USUARIOS Y ROLES (RF-ADM-01 y RF-ADM-02)
 # ==========================================
 class UsuarioService:
     @staticmethod
@@ -96,9 +268,11 @@ class UsuarioService:
     def crear(
         session: Session, usuario_in: models.UsuarioCreate, admin_actual: Usuarios, ip_origen: str
     ) -> Usuarios:
+        correo_str = str(usuario_in.correo).strip().lower()
+
         # RN-ADM-01.1: Unicidad de correo
         correo_existente = session.exec(
-            select(Usuarios).where(Usuarios.correo == str(usuario_in.correo))
+            select(Usuarios).where(Usuarios.correo == correo_str)
         ).first()
         if correo_existente:
             raise HTTPException(
@@ -110,6 +284,9 @@ class UsuarioService:
         if not rol or not rol.activo:
             raise HTTPException(status_code=404, detail="El rol especificado no existe o está inactivo.")
 
+        # RN-ADM-01.8 a RN-ADM-01.11: Validar correo contra diccionario institucional o de contratista
+        DiccionarioCorreoService.validar_correo_para_rol(session, correo_str, rol.nombre)
+
         # RN-ADM-01.2 y RNF-SEG-01: Hash tanto para contraseña como para firma electrónica
         firma_hash = (
             get_password_hash(usuario_in.firma_electronica)
@@ -120,7 +297,7 @@ class UsuarioService:
         nuevo_usuario = Usuarios(
             id_rol_usuario=usuario_in.id_rol_usuario,
             nombre_completo=usuario_in.nombre_completo,
-            correo=str(usuario_in.correo),
+            correo=correo_str,
             password_hash=get_password_hash(usuario_in.password),
             firma_electronica=firma_hash,
             activo=True
@@ -151,6 +328,7 @@ class UsuarioService:
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuario no encontrado.")
 
+        rol_objetivo = usuario.rol
         # Validaciones si se intenta cambiar el rol (RN-ADM-01.5, RN-ADM-01.6, RN-ADM-02.2)
         if usuario_in.id_rol_usuario is not None and usuario_in.id_rol_usuario != usuario.id_rol_usuario:
             if usuario.id_usuario == admin_actual.id_usuario:
@@ -177,15 +355,20 @@ class UsuarioService:
             nuevo_rol = session.get(RolUsuario, usuario_in.id_rol_usuario)
             if not nuevo_rol or not nuevo_rol.activo:
                 raise HTTPException(status_code=404, detail="El nuevo rol especificado no existe o está inactivo.")
+            rol_objetivo = nuevo_rol
             usuario.id_rol_usuario = usuario_in.id_rol_usuario
 
-        if usuario_in.correo and str(usuario_in.correo) != usuario.correo:
-            duplicado = session.exec(
-                select(Usuarios).where(Usuarios.correo == str(usuario_in.correo))
-            ).first()
-            if duplicado:
-                raise HTTPException(status_code=400, detail="RN-ADM-01.1: El correo ya está en uso.")
-            usuario.correo = str(usuario_in.correo)
+        if usuario_in.correo:
+            correo_nuevo = str(usuario_in.correo).strip().lower()
+            if correo_nuevo != usuario.correo:
+                duplicado = session.exec(
+                    select(Usuarios).where(Usuarios.correo == correo_nuevo)
+                ).first()
+                if duplicado:
+                    raise HTTPException(status_code=400, detail="RN-ADM-01.1: El correo ya está en uso.")
+                if rol_objetivo:
+                    DiccionarioCorreoService.validar_correo_para_rol(session, correo_nuevo, rol_objetivo.nombre)
+                usuario.correo = correo_nuevo
 
         if usuario_in.nombre_completo:
             usuario.nombre_completo = usuario_in.nombre_completo
@@ -212,10 +395,6 @@ class UsuarioService:
     def suspender(
         session: Session, id_usuario: int, admin_actual: Usuarios, ip_origen: str
     ) -> dict:
-        """
-        RN-ADM-01.3 a RN-ADM-01.7: Suspensión lógica, validación de quórum de Admin
-        y disparo en cascada de Vacante Operativa en obras activas.
-        """
         if id_usuario == admin_actual.id_usuario:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -236,11 +415,9 @@ class UsuarioService:
                     detail="RN-ADM-01.5: El sistema requiere mínimo 1 Administrador activo. Dé de alta un suplente primero."
                 )
 
-        # 1. Suspensión lógica (RN-ADM-01.3)
         usuario.activo = False
         session.add(usuario)
 
-        # 2. Efecto en cascada sobre asignaciones vigentes (RN-ADM-01.4 y RN-ADM-03.4)
         hoy = date.today()
         asignaciones_activas = list(
             session.exec(
@@ -297,16 +474,11 @@ class UsuarioService:
 
 
 # ==========================================
-# 3. SERVICIO DE ASIGNACIONES Y RELEVOS EN OBRA (RF-ADM-03 y RN-ADM-04.2)
+# 4. SERVICIO DE ASIGNACIONES Y RELEVOS EN OBRA (RF-ADM-03 y RN-ADM-04.2)
 # ==========================================
 class AsignacionObraService:
     @staticmethod
     def evaluar_activacion_obra(session: Session, id_obra: int) -> str:
-        """
-        RN-ADM-04.2 y RF-SYS-02: Verifica si la obra tiene Contrato, Pólizas y sus 3 actores operativos
-        (Residente, Supervisor, Superintendente) activos para pasarla a EN_EJECUCION.
-        Respeta si la obra se encuentra SUSPENDIDA o FINIQUITADA/CERRADA.
-        """
         obra = session.get(Obras, id_obra)
         if not obra:
             return "NO_ENCONTRADA"
@@ -372,7 +544,6 @@ class AsignacionObraService:
                 detail="RF-ADM-03: Solo se pueden vincular usuarios operativos (Residente, Supervisor, Superintendente)."
             )
 
-        # RN-ADM-03.2: Unicidad por área en la obra (no puede haber 2 del mismo rol activos simultáneamente)
         hoy = date.today()
         asignaciones_vigentes = list(
             session.exec(
@@ -415,7 +586,6 @@ class AsignacionObraService:
         session.commit()
         session.refresh(nueva_asig)
 
-        # Evaluar si con esta asignación se completa la plantilla o se resuelve una vacante (RN-ADM-04.2)
         AsignacionObraService.evaluar_activacion_obra(session, asig_in.id_obra)
 
         AuditoriaService.registrar_evento(
@@ -433,10 +603,6 @@ class AsignacionObraService:
     def desvincular_usuario_de_obra(
         session: Session, id_asignacion: int, admin_actual: Usuarios, ip_origen: str
     ) -> dict:
-        """
-        RN-ADM-03.4: Desvincula a un usuario operativo de una obra específica sin suspender su cuenta,
-        registra fecha_fin_asignacion = hoy y pasa la obra a ALERTA_VACANTE_OPERATIVA.
-        """
         asig = session.get(ObrasAsignaciones, id_asignacion)
         if not asig:
             raise HTTPException(status_code=404, detail="Asignación no encontrada.")
@@ -482,10 +648,6 @@ class AsignacionObraService:
     def ejecutar_relevo_operativo(
         session: Session, relevo_in: models.RelevoOperativoCreate, admin_actual: Usuarios, ip_origen: str
     ) -> dict:
-        """
-        RN-ADM-03.5 a RN-ADM-03.7: Corte histórico en Obras_asignaciones sin borrar al saliente,
-        alta del entrante con fecha fin = fecha fin de la obra y registro obligatorio en Auditoría.
-        """
         obra = session.get(Obras, relevo_in.id_obra)
         if not obra:
             raise HTTPException(status_code=404, detail="Obra no encontrada.")
@@ -511,11 +673,9 @@ class AsignacionObraService:
         if not asig_saliente:
             raise HTTPException(status_code=404, detail="No se encontró asignación del usuario saliente en esta obra.")
 
-        # RN-ADM-03.5: Actualizar fecha_fin_asignacion del saliente sin borrarlo
         asig_saliente.fecha_fin_asignacion = max(relevo_in.fecha_relevo, asig_saliente.fecha_inicio_asignacion)
         session.add(asig_saliente)
 
-        # RN-ADM-03.5: Insertar nueva asignación para el entrante hasta fecha_fin de la obra
         nueva_asig = ObrasAsignaciones(
             id_obra=obra.id_obra,
             id_usuario=u_entrante.id_usuario,
@@ -528,7 +688,6 @@ class AsignacionObraService:
 
         estado_obra = AsignacionObraService.evaluar_activacion_obra(session, obra.id_obra)
 
-        # RN-ADM-03.7: Registro obligatorio en Auditoría indicando qué Administrador ejecutó el relevo
         AuditoriaService.registrar_evento(
             session=session,
             id_usuario=admin_actual.id_usuario,

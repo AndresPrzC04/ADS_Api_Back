@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlmodel import Session, select
 from app.core.database import get_session
 from app.core.dependencies import (
-     get_current_user,
+    get_current_user,
     roles_operativos_obra,
     solo_supervisor,
     verificar_participacion_en_obra,
@@ -12,13 +12,14 @@ from app.models_base import (
     BitacoraNotas,
     ConceptosCatalogo,
     EvidenciaAdjunta,
+    ReporteDiarioSupervision,
     Usuarios,
 )
 from . import models, service
 
 router = APIRouter(
     prefix="/bitacora-expediente",
-    tags=["04. Bitácora Electrónica Inmutable, Evidencia Fotográfica, Calidad y Reporte Diario"]
+    tags=["04. Bitácora Electrónica Inmutable, Reportes de Supervisión, Evidencia y Calidad"]
 )
 
 
@@ -62,7 +63,7 @@ def firmar_nota_bitacora(
     return service.BitacoraService.firmar_nota(session, id_nota, firma_in, current_user, ip)
 
 
-# --- 2. Evidencia Fotográfica Adjunta (RF-SUPT-04, RF-SUPT-05) ---
+# --- 2. Evidencia Fotográfica Adjunta (Bitácora o Reporte de Supervisión) ---
 @router.post("/evidencias", response_model=models.EvidenciaAdjuntaPublic, status_code=status.HTTP_201_CREATED)
 def agregar_evidencia_adjunta(
     ev_in: models.EvidenciaAdjuntaCreate,
@@ -78,16 +79,16 @@ def listar_evidencias_nota(
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(get_current_user)
 ):
-    return session.exec(select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_nota == id_nota)).all()
+    return list(session.exec(select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_nota == id_nota)).all())
 
 
-@router.get("/generadores/{id_generador}/evidencias", response_model=List[models.EvidenciaAdjuntaPublic])
-def listar_evidencias_generador(
-    id_generador: int,
+@router.get("/reportes-diarios/{id_reporte}/evidencias", response_model=List[models.EvidenciaAdjuntaPublic])
+def listar_evidencias_reporte(
+    id_reporte: int,
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(get_current_user)
 ):
-    return session.exec(select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_generador == id_generador)).all()
+    return list(session.exec(select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_reporte == id_reporte)).all())
 
 
 @router.delete("/evidencias/{id_evidencia}")
@@ -99,7 +100,85 @@ def eliminar_evidencia_adjunta(
     return service.EvidenciaService.eliminar_evidencia(session, id_evidencia)
 
 
-# --- 3. Control de Calidad y Reportes Diarios de Supervisión (RF-SUP-03) ---
+# --- 3. Reporte Diario de Supervisión con Ciclo de Firma y Avance Físico (RF-SUP-03) ---
+@router.post(
+    "/reportes-diarios",
+    response_model=models.ReporteDiarioSupervisionPublic,
+    status_code=status.HTTP_201_CREATED
+)
+def crear_reporte_borrador(
+    reporte_in: models.ReporteDiarioSupervisionCreate,
+    session: Session = Depends(get_session),
+    supervisor: Usuarios = Depends(solo_supervisor)
+):
+    verificar_participacion_en_obra(reporte_in.id_obra, session, supervisor)
+    return service.SupervisionCalidadService.crear_reporte_borrador(session, reporte_in, supervisor)
+
+
+@router.patch(
+    "/reportes-diarios/{id_reporte}",
+    response_model=models.ReporteDiarioSupervisionPublic
+)
+def actualizar_reporte_sin_firma(
+    id_reporte: int,
+    reporte_in: models.ReporteDiarioSupervisionUpdate,
+    session: Session = Depends(get_session),
+    supervisor: Usuarios = Depends(solo_supervisor)
+):
+    reporte = session.get(ReporteDiarioSupervision, id_reporte)
+    if reporte:
+        verificar_participacion_en_obra(reporte.id_obra, session, supervisor)
+    return service.SupervisionCalidadService.actualizar_reporte(session, id_reporte, reporte_in)
+
+
+@router.patch(
+    "/reportes-diarios/{id_reporte}/enviar",
+    response_model=models.ReporteDiarioSupervisionPublic
+)
+def enviar_reporte_supervision(
+    id_reporte: int,
+    session: Session = Depends(get_session),
+    supervisor: Usuarios = Depends(solo_supervisor)
+):
+    reporte = session.get(ReporteDiarioSupervision, id_reporte)
+    if reporte:
+        verificar_participacion_en_obra(reporte.id_obra, session, supervisor)
+    return service.SupervisionCalidadService.enviar_reporte(session, id_reporte)
+
+
+@router.patch(
+    "/reportes-diarios/{id_reporte}/firmar",
+    response_model=models.ReporteDiarioSupervisionPublic
+)
+def firmar_reporte_supervision(
+    id_reporte: int,
+    request: Request,
+    firma_in: models.ReporteDiarioFirmaInput,
+    session: Session = Depends(get_session),
+    supervisor: Usuarios = Depends(solo_supervisor)
+):
+    reporte = session.get(ReporteDiarioSupervision, id_reporte)
+    if reporte:
+        verificar_participacion_en_obra(reporte.id_obra, session, supervisor)
+    ip = request.client.host if request.client else "127.0.0.1"
+    return service.SupervisionCalidadService.firmar_reporte(session, id_reporte, firma_in, supervisor, ip)
+
+
+@router.get("/obras/{id_obra}/reportes-diarios", response_model=List[models.ReporteDiarioSupervisionPublic])
+def listar_reportes_diarios_obra(
+    id_obra: int,
+    skip: int = 0,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
+):
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return service.SupervisionCalidadService.consultar_reportes_diarios(
+        session, id_obra, skip=skip, limit=limit
+    )
+
+
+# --- 4. Control de Calidad y Pruebas de Laboratorio (RF-SUP-03) ---
 @router.post(
     "/calidad-pruebas",
     response_model=models.ControlCalidadPruebaPublic,
@@ -124,27 +203,3 @@ def listar_pruebas_calidad_obra(
 ):
     verificar_participacion_en_obra(id_obra, session, current_user)
     return service.SupervisionCalidadService.consultar_pruebas_obra(session, id_obra)
-
-
-@router.post(
-    "/reportes-diarios",
-    response_model=models.ReporteDiarioSupervisionPublic,
-    status_code=status.HTTP_201_CREATED
-)
-def crear_reporte_diario_supervision(
-    reporte_in: models.ReporteDiarioSupervisionCreate,
-    session: Session = Depends(get_session),
-    supervisor: Usuarios = Depends(solo_supervisor)
-):
-    verificar_participacion_en_obra(reporte_in.id_obra, session, supervisor)
-    return service.SupervisionCalidadService.crear_reporte_diario(session, reporte_in, supervisor)
-
-
-@router.get("/obras/{id_obra}/reportes-diarios", response_model=List[models.ReporteDiarioSupervisionPublic])
-def listar_reportes_diarios_obra(
-    id_obra: int,
-    session: Session = Depends(get_session),
-    current_user: Usuarios = Depends(get_current_user)
-):
-    verificar_participacion_en_obra(id_obra, session, current_user)
-    return service.SupervisionCalidadService.consultar_reportes_diarios(session, id_obra)

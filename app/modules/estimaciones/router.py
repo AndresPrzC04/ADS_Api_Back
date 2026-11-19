@@ -10,16 +10,12 @@ from app.core.dependencies import (
     solo_supervisor,
     verificar_participacion_en_obra,
 )
-from app.models_base import (
-    FacturacionEstimacion,
-    Generadores,
-    Usuarios,
-)
+from app.models_base import FacturacionEstimacion, Usuarios
 from . import models, service
 
 router = APIRouter(
     prefix="/estimaciones",
-    tags=["03. Estimaciones, Números Generadores, Revisión Técnica, CFDI y Pagos"]
+    tags=["03. Estimaciones, Revisión Técnica, CFDI y Pagos"]
 )
 
 
@@ -34,6 +30,18 @@ def crear_borrador_estimacion(
     verificar_participacion_en_obra(estimacion_in.id_obra, session, superintendente)
     ip = request.client.host if request.client else "127.0.0.1"
     return service.EstimacionService.crear_borrador(session, estimacion_in, superintendente, ip)
+
+
+@router.patch("/{id_estimacion}/corregir", response_model=models.EstimacionPublic)
+def corregir_estimacion_borrador_o_rechazada(
+    id_estimacion: int,
+    est_in: models.EstimacionUpdate,
+    session: Session = Depends(get_session),
+    superintendente: Usuarios = Depends(solo_superintendente)
+):
+    est = service.EstimacionService.obtener_por_id(session, id_estimacion)
+    verificar_participacion_en_obra(est.id_obra, session, superintendente)
+    return service.EstimacionService.corregir_borrador_o_rechazada(session, id_estimacion, est_in)
 
 
 @router.get("/obra/{id_obra}", response_model=List[models.EstimacionPublic])
@@ -81,65 +89,8 @@ def enviar_estimacion_a_revision(
     return service.EstimacionService.enviar_a_revision(session, id_estimacion, superintendente, ip)
 
 
-# --- 2. Números Generadores y Validación Técnica (RF-SUPT-04, RF-SUP-01) ---
-@router.post("/generadores", response_model=models.GeneradorPublic, status_code=status.HTTP_201_CREATED)
-def crear_generador(
-    gen_in: models.GeneradorCreate,
-    session: Session = Depends(get_session),
-    superintendente: Usuarios = Depends(solo_superintendente)
-):
-    est = service.EstimacionService.obtener_por_id(session, gen_in.id_estimacion)
-    verificar_participacion_en_obra(est.id_obra, session, superintendente)
-    return service.GeneradorService.crear(session, gen_in)
-
-
-@router.get("/{id_estimacion}/generadores", response_model=List[models.GeneradorPublic])
-def consultar_generadores_estimacion(
-    id_estimacion: int,
-    session: Session = Depends(get_session),
-    current_user: Usuarios = Depends(get_current_user)
-):
-    est = service.EstimacionService.obtener_por_id(session, id_estimacion)
-    verificar_participacion_en_obra(est.id_obra, session, current_user)
-    return service.GeneradorService.consultar_por_estimacion(session, id_estimacion)
-
-
-@router.patch("/generadores/{id_generador}/corregir", response_model=models.GeneradorPublic)
-def corregir_generador(
-    id_generador: int,
-    gen_in: models.GeneradorUpdate,
-    session: Session = Depends(get_session),
-    superintendente: Usuarios = Depends(solo_superintendente)
-):
-    gen = session.get(Generadores, id_generador)
-    if gen:
-        est = service.EstimacionService.obtener_por_id(session, gen.id_estimacion)
-        verificar_participacion_en_obra(est.id_obra, session, superintendente)
-    return service.GeneradorService.corregir_generador(session, id_generador, gen_in)
-
-
-@router.post(
-    "/generadores/validaciones",
-    response_model=models.GeneradorValidacionPublic,
-    status_code=status.HTTP_201_CREATED
-)
-def registrar_dictamen_generador(
-    val_in: models.GeneradorValidacionCreate,
-    session: Session = Depends(get_session),
-    supervisor: Usuarios = Depends(solo_supervisor)
-):
-    gen = session.get(Generadores, val_in.id_generador)
-    if gen:
-        est = service.EstimacionService.obtener_por_id(session, gen.id_estimacion)
-        verificar_participacion_en_obra(est.id_obra, session, supervisor)
-    return service.GeneradorService.validar_generador(session, val_in)
-
-
-# --- 3. Revisión Técnica del Supervisor y Plazos de 15 Días (RF-SUP-02, RF-SUP-06) ---
-@router.post(
-    "/{id_estimacion}/dictaminar",
-    response_model=models.RevisionEstimacionPublic
-)
+# --- 2. Revisión Técnica del Supervisor y Plazos de 15 Días (RF-SUP-02, RF-SUP-06) ---
+@router.post("/{id_estimacion}/dictaminar", response_model=models.RevisionEstimacionPublic)
 def dictaminar_estimacion_supervisor(
     id_estimacion: int,
     request: Request,
@@ -176,7 +127,7 @@ def consultar_alertas_plazo_revision(
     return service.RevisionEstimacionService.consultar_alertas_plazo_15_dias(session, id_obra)
 
 
-# --- 4. Autorización de Pago del Residente, CFDI y Liquidación (RF-RES-03, RF-SUPT-06) ---
+# --- 3. Autorización de Pago del Residente, CFDI y Liquidación (RF-RES-03, RF-SUPT-06) ---
 @router.patch("/{id_estimacion}/autorizar-pago", response_model=models.EstimacionPublic)
 def autorizar_pago_estimacion(
     id_estimacion: int,

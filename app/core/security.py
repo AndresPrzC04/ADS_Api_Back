@@ -40,12 +40,12 @@ def validar_firma_electronica_y_generar_sello(
     if not firma_hash_usuario:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="RNF-SEG-04: Su usuario no tiene configurada una firma electrónica activa."
+            detail="Su usuario no tiene configurada una firma electrónica activa."
         )
     if not verify_password(firma_plana, firma_hash_usuario):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="RNF-SEG-04: La firma electrónica proporcionada es inválida."
+            detail="La firma electrónica proporcionada es inválida."
         )
     marca_tiempo = datetime.now(timezone.utc).isoformat()
     cadena_original = f"USR:{id_usuario}|REF:{referencia}|TS:{marca_tiempo}"
@@ -74,21 +74,21 @@ def validar_formato_y_tamano_archivo(
     if ext in EXTENSIONES_PROHIBIDAS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"RNF-USA-05: Archivo rechazado por seguridad. Los scripts o ejecutables ({ext}) están estrictamente prohibidos."
+            detail=f"Archivo rechazado por seguridad. Los scripts o ejecutables ({ext}) están estrictamente prohibidos."
         )
 
     ext_permitidas_norm = tuple(e.lower() for e in extensiones_validas)
     if ext not in ext_permitidas_norm:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"RNF-USA-05 / RN-SUPT-04.2: Formato '{ext}' no permitido. Formatos aceptados: {ext_permitidas_norm}"
+            detail=f"Formato '{ext}' no permitido. Formatos aceptados: {ext_permitidas_norm}"
         )
 
     limite_bytes = max_mb * 1024 * 1024
     if tamano_bytes is not None and tamano_bytes > limite_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"RNF-REN-01: El archivo excede el tamaño máximo permitido de {max_mb} MB."
+            detail=f"El archivo excede el tamaño máximo permitido de {max_mb} MB."
         )
 
 

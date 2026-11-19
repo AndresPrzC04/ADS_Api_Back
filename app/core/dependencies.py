@@ -1,5 +1,5 @@
 from datetime import date
-from typing import List
+from typing import Any, List
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
@@ -16,15 +16,24 @@ def get_current_user(
     session: Session = Depends(get_session)
 ) -> Usuarios:
     payload = decode_access_token(token)
-    id_usuario_str: str = str(payload.get("sub")) # Revisar
-    if not id_usuario_str:
+    sub_raw: Any = payload.get("sub")
+    if sub_raw is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciales de token inválidas.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    usuario = session.get(Usuarios, int(id_usuario_str))
+    try:
+        id_usuario = int(str(sub_raw))
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Identificador de usuario en token inválido.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    usuario = session.get(Usuarios, id_usuario)
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -35,7 +44,7 @@ def get_current_user(
     if not usuario.activo:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="RN-ADM-01.4: Su cuenta de usuario se encuentra suspendida o inhabilitada.",
+            detail="Su cuenta de usuario se encuentra suspendida o inhabilitada.",
         )
 
     # RN-DIR-03.1: El rol DIRECTIVO solo tiene autorización para peticiones GET
@@ -43,7 +52,7 @@ def get_current_user(
     if nombre_rol == "DIRECTIVO" and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="RN-DIR-03.1: El rol DIRECTIVO tiene acceso exclusivo de solo lectura (GET)."
+            detail="El rol DIRECTIVO tiene acceso exclusivo de solo lectura (GET)."
         )
 
     return usuario
@@ -85,12 +94,14 @@ def verificar_participacion_en_obra(
         return current_user
 
     hoy = date.today()
-    asignaciones = session.exec(
-        select(ObrasAsignaciones).where(
-            ObrasAsignaciones.id_obra == id_obra,
-            ObrasAsignaciones.id_usuario == current_user.id_usuario
-        )
-    ).all()
+    asignaciones = list(
+        session.exec(
+            select(ObrasAsignaciones).where(
+                ObrasAsignaciones.id_obra == id_obra,
+                ObrasAsignaciones.id_usuario == current_user.id_usuario
+            )
+        ).all()
+    )
 
     asignacion_vigente = next(
         (
@@ -104,6 +115,6 @@ def verificar_participacion_en_obra(
     if not asignacion_vigente:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"RN-ADM-03.1: No tiene una asignación operativa vigente en la obra con ID {id_obra}."
+            detail=f"No tiene una asignación operativa vigente en la obra con ID {id_obra}."
         )
     return current_user

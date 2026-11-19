@@ -22,16 +22,13 @@ from app.models_base import (
     Estimaciones,
     EstimacionesPagadas,
     EvidenciaAdjunta,
-    Generadores,
-    GeneradoresValidacion,
     Obras,
     ObrasAsignaciones,
     Polizas,
-    ProgramaEjecucion,
     RevisionEstimaciones,
     Usuarios,
 )
-from app.modules.usuario_accesos.service import AsignacionObraService, AuditoriaService
+from app.modules.usuarios_accesos.service import AsignacionObraService, AuditoriaService
 from . import models
 
 
@@ -86,10 +83,6 @@ class ContratistaService:
 class ObraContratoService:
     @staticmethod
     def linea_base_congelada(session: Session, id_obra: int) -> bool:
-        """
-        RN-ADM-04.4 y RN-ADM-04.5: La línea base queda congelada en el instante en que el Residente
-        firma la Nota de Apertura de Bitácora (consecutivo 1) o existe al menos una estimación registrada.
-        """
         tipo_apertura = session.exec(
             select(CatTipoNotaBitacora).where(CatTipoNotaBitacora.clave == "APERTURA")
         ).first()
@@ -132,7 +125,6 @@ class ObraContratoService:
                 detail="La fecha de término no puede ser anterior a la fecha de inicio."
             )
 
-        # RN-ADM-04.1: Al crearse sin personal completo, su estado general inicia en EN_CONFIGURACION
         est_config = session.exec(
             select(CatEstatus).where(
                 CatEstatus.ambito == "OBRA",
@@ -168,10 +160,6 @@ class ObraContratoService:
     def listar_obras_segun_rol(
         session: Session, current_user: Usuarios, skip: int = 0, limit: int = 100
     ) -> List[models.ObraPublic]:
-        """
-        RN-ADM-03.1 y RN-DIR-01.1: Administrador y Directivo tienen visibilidad global.
-        Residente, Supervisor y Superintendente solo ven obras con asignación vigente.
-        """
         rol_nombre = current_user.rol.nombre.upper() if current_user.rol else ""
         if rol_nombre in {"ADMINISTRADOR", "DIRECTIVO"}:
             obras = list(session.exec(select(Obras).offset(skip).limit(limit)).all())
@@ -208,7 +196,6 @@ class ObraContratoService:
     ) -> models.ObraPublic:
         obra = ObraContratoService.obtener_obra(session, id_obra)
 
-        # RN-ADM-04.5: Congelamiento de línea base tras firma de Nota de Apertura o Estimaciones
         if ObraContratoService.linea_base_congelada(session, id_obra):
             if any([
                 obra_in.presupuesto_total is not None,
@@ -291,7 +278,6 @@ class ObraContratoService:
         session.commit()
         session.refresh(nuevo_contrato)
 
-        # RN-ADM-04.2: Evaluar si ya cumple condiciones para pasar a EN_EJECUCION
         AsignacionObraService.evaluar_activacion_obra(session, contrato_in.id_obra)
 
         AuditoriaService.registrar_evento(
@@ -369,7 +355,6 @@ class ObraContratoService:
         session.commit()
         session.refresh(nueva_poliza)
 
-        # RN-ADM-04.2: Evaluar activación automática de la obra a EN_EJECUCION
         AsignacionObraService.evaluar_activacion_obra(session, contrato.id_obra)
 
         AuditoriaService.registrar_evento(
@@ -387,7 +372,6 @@ class ObraContratoService:
     def actualizar_poliza_renovada(
         session: Session, id_poliza: int, poliza_in: models.PolizaUpdate, admin: Usuarios
     ) -> Polizas:
-        """RN-ADM-04.5: Permite al Administrador actualizar archivos de pólizas renovadas incluso en ejecución."""
         poliza = session.get(Polizas, id_poliza)
         if not poliza:
             raise HTTPException(status_code=404, detail="Póliza no encontrada.")
@@ -405,9 +389,9 @@ class ObraContratoService:
 
 
 # ==========================================
-# 3. SERVICIO: CATÁLOGO DE CONCEPTOS, APU Y PROGRAMA (RF-SUPT-01, RF-SUPT-02, RF-RES-04, RF-SUP-04)
+# 3. SERVICIO: CATÁLOGO DE CONCEPTOS Y APU EXTRAORDINARIOS (RF-SUPT-01, RF-RES-04)
 # ==========================================
-class CatalogoProgramaService:
+class CatalogoConceptosService:
     @staticmethod
     def cargar_conceptos_ordinarios(
         session: Session, conceptos_in: List[models.ConceptoCatalogoCreate]
@@ -418,7 +402,6 @@ class CatalogoProgramaService:
         id_obra = conceptos_in[0].id_obra
         obra = ObraContratoService.obtener_obra(session, id_obra)
 
-        # RN-SUPT-01.3: Congelamiento de línea base
         if ObraContratoService.linea_base_congelada(session, id_obra):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -448,7 +431,6 @@ class CatalogoProgramaService:
             if item.id_obra != id_obra:
                 raise HTTPException(status_code=400, detail="Todos los conceptos del lote deben pertenecer a la misma obra.")
             clave_norm = item.clave_concepto.strip().upper()
-            # RN-SUPT-01.2: Unicidad de clave por obra
             if clave_norm in claves_existentes or clave_norm in claves_lote:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -460,7 +442,6 @@ class CatalogoProgramaService:
                 raise HTTPException(status_code=404, detail=f"Unidad de medida ID {item.id_unidad} no válida.")
             importe_nuevo += (item.cantidad_presupuestada * item.precio_unitario)
 
-        # RN-SUPT-01.1: Tope presupuestal estricto
         if (importe_actual + importe_nuevo) > tope_financiero:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -550,10 +531,6 @@ class CatalogoProgramaService:
         residente: Usuarios,
         ip_origen: str
     ) -> ConceptosCatalogo:
-        """
-        RF-RES-04 (RN-RES-04.1 y RN-RES-04.2): Autorización e inyección de precios extraordinarios
-        con validación obligatoria de dictamen APU (.pdf) y firma electrónica del Residente.
-        """
         obra = ObraContratoService.obtener_obra(session, inyeccion_in.id_obra)
         validar_formato_y_tamano_archivo(inyeccion_in.dictamen_apu_url, (".pdf",))
 
@@ -608,205 +585,37 @@ class CatalogoProgramaService:
         )
         return nuevo_ext
 
-    @staticmethod
-    def registrar_actividad_programa(
-        session: Session, prog_in: models.ProgramaEjecucionCreate
-    ) -> ProgramaEjecucion:
-        """
-        RF-SUPT-02 (RN-SUPT-02.1 a RN-SUPT-02.3): Alineación al plazo contractual,
-        consistencia de volúmenes y bloqueo tras inicio de ejecución.
-        """
-        concepto = session.get(ConceptosCatalogo, prog_in.id_concepto)
-        if not concepto:
-            raise HTTPException(status_code=404, detail="El concepto especificado no existe.")
-
-        obra = ObraContratoService.obtener_obra(session, concepto.id_obra)
-
-        # RN-SUPT-02.3: Bloqueo de edición manual tras inicio del contrato
-        if ObraContratoService.linea_base_congelada(session, obra.id_obra):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "RN-SUPT-02.3: El programa de ejecución se encuentra bloqueado. "
-                    "Los desplazamientos de fechas solo ocurren automáticamente por suspensión/reanudación."
-                )
-            )
-
-        if prog_in.fecha_fin_prog < prog_in.fecha_inicio_prog:
-            raise HTTPException(status_code=400, detail="La fecha fin programada no puede ser menor a la de inicio.")
-
-        # RN-SUPT-02.1: Alineación al plazo contractual de la obra
-        if prog_in.fecha_inicio_prog < obra.fecha_inicio or prog_in.fecha_fin_prog > obra.fecha_fin:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"RN-SUPT-02.1: Las fechas de la actividad ({prog_in.fecha_inicio_prog} a {prog_in.fecha_fin_prog}) "
-                    f"deben estar dentro del plazo contractual ({obra.fecha_inicio} a {obra.fecha_fin})."
-                )
-            )
-
-        # RN-SUPT-02.2: La suma programada no puede exceder la cantidad presupuestada del concepto
-        actividades_previas = list(
-            session.exec(
-                select(ProgramaEjecucion).where(ProgramaEjecucion.id_concepto == concepto.id_concepto)
-            ).all()
-        )
-        suma_previa = sum((a.cant_programada for a in actividades_previas), Decimal("0.00"))
-        if (suma_previa + prog_in.cant_programada) > concepto.cantidad_presupuestada:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"RN-SUPT-02.2: La cantidad programada acumulada ({suma_previa + prog_in.cant_programada}) "
-                    f"supera la cantidad presupuestada del concepto ({concepto.cantidad_presupuestada})."
-                )
-            )
-
-        nueva_act = ProgramaEjecucion(
-            id_concepto=prog_in.id_concepto,
-            fecha_inicio_prog=prog_in.fecha_inicio_prog,
-            fecha_fin_prog=prog_in.fecha_fin_prog,
-            cant_programada=prog_in.cant_programada
-        )
-        session.add(nueva_act)
-        session.commit()
-        session.refresh(nueva_act)
-        return nueva_act
-
-    @staticmethod
-    def consultar_gantt_obra(session: Session, id_obra: int) -> List[ProgramaEjecucion]:
-        return list(
-            session.exec(
-                select(ProgramaEjecucion)
-                .join(ConceptosCatalogo)
-                .where(ConceptosCatalogo.id_obra == id_obra)
-                .order_by(col(ProgramaEjecucion.fecha_inicio_prog).asc())
-            ).all()
-        )
-
-    @staticmethod
-    def monitorear_ruta_critica(
-        session: Session, id_obra: int, fecha_corte: Optional[date] = None
-    ) -> List[models.ActividadRutaCriticaPublic]:
-        """
-        RF-SUP-04 y RN-SUP-04.1: Compara cant_programada contra cant_aprobada en Generadores_Validacion,
-        marcando en rojo toda actividad cuya fecha_fin_prog haya vencido sin alcanzar el 100%.
-        """
-        corte = fecha_corte or date.today()
-        actividades = CatalogoProgramaService.consultar_gantt_obra(session, id_obra)
-        resultado: List[models.ActividadRutaCriticaPublic] = []
-
-        for act in actividades:
-            concepto = session.get(ConceptosCatalogo, act.id_concepto)
-            generadores = list(
-                session.exec(
-                    select(Generadores).where(Generadores.id_concepto == act.id_concepto)
-                ).all()
-            )
-
-            aprobado_concepto = Decimal("0.00")
-            for g in generadores:
-                ult_val = session.exec(
-                    select(GeneradoresValidacion)
-                    .where(GeneradoresValidacion.id_generador == g.id_generador)
-                    .order_by(col(GeneradoresValidacion.version_revisada).desc())
-                ).first()
-                if ult_val:
-                    aprobado_concepto += ult_val.cant_aprobada
-
-            pct = (
-                _redondear_2((aprobado_concepto / act.cant_programada) * Decimal("100.00"))
-                if act.cant_programada > 0
-                else Decimal("0.00")
-            )
-            en_rojo = (corte > act.fecha_fin_prog) and (aprobado_concepto < act.cant_programada)
-            estado = "EN_ROJO_ATRASO_CRITICO" if en_rojo else ("COMPLETADA" if pct >= Decimal("100.00") else "EN_TIEMPO")
-
-            resultado.append(
-                models.ActividadRutaCriticaPublic(
-                    id_actividad=act.id_actividad,
-                    id_concepto=act.id_concepto,
-                    clave_concepto=concepto.clave_concepto if concepto else "",
-                    descripcion_concepto=concepto.descripcion if concepto else "",
-                    fecha_inicio_prog=act.fecha_inicio_prog,
-                    fecha_fin_prog=act.fecha_fin_prog,
-                    cant_programada=act.cant_programada,
-                    cant_aprobada_acumulada=aprobado_concepto,
-                    porcentaje_cumplimiento=min(Decimal("100.00"), pct),
-                    en_rojo_atraso=en_rojo,
-                    estado_actividad=estado
-                )
-            )
-        return resultado
-
 
 # ==========================================
-# 4. SERVICIO: DASHBOARD DIRECTIVO, GANTT MACRO, REPORTES Y FINIQUITO (RF-DIR-01 a 04, RF-RES-05)
+# 4. SERVICIO: AVANCES FÍSICOS, DASHBOARD DIRECTIVO, REPORTES Y FINIQUITO
 # ==========================================
 class DirectivoFiniquitoService:
     @staticmethod
+    def obtener_ultimo_avance_fisico(session: Session, id_obra: int) -> Decimal:
+        """Devuelve el último porcentaje_fisico oficial registrado en Avances_Fisicos para la obra."""
+        ultimo = session.exec(
+            select(AvancesFisicos)
+            .where(AvancesFisicos.id_obra == id_obra)
+            .order_by(col(AvancesFisicos.id_avance).desc())
+        ).first()
+        return ultimo.porcentaje_fisico if ultimo else Decimal("0.00")
+
+    @staticmethod
     def calcular_avances_obra(session: Session, obra: Obras, fecha_corte: Optional[date] = None) -> dict:
         """
-        RN-DIR-01.2 a RN-DIR-01.6: Calcula Avance Físico Programado, Avance Financiero Programado,
-        Avance Físico Real (respaldado por Generadores_Validacion) y Avance Financiero Real.
+        RF-DIR-01 (Sin Generadores ni Gantt):
+        - Avance Físico Real: último porcentaje_fisico registrado en Avances_Fisicos
+          (generado automáticamente al firmar reportes de supervisión en RF-SUP-03).
+        - Avance Financiero Real: suma de pagos liquidados (o revisiones aprobadas) / presupuesto_total.
         """
         corte = fecha_corte or date.today()
         contrato = session.exec(select(Contratos).where(Contratos.id_obra == obra.id_obra)).first()
         monto_contrato = contrato.monto_contrato if contrato else obra.presupuesto_total
 
-        # 1. Importe programado a la fecha de corte (RN-DIR-01.2 y RN-DIR-01.3)
-        actividades = list(
-            session.exec(
-                select(ProgramaEjecucion)
-                .join(ConceptosCatalogo)
-                .where(
-                    ConceptosCatalogo.id_obra == obra.id_obra,
-                    col(ProgramaEjecucion.fecha_fin_prog) <= corte
-                )
-            ).all()
-        )
+        # 1. Avance físico real vigente en Avances_Fisicos
+        pct_fisico_real = DirectivoFiniquitoService.obtener_ultimo_avance_fisico(session, obra.id_obra)
 
-        importe_programado = Decimal("0.00")
-        for act in actividades:
-            conc = session.get(ConceptosCatalogo, act.id_concepto)
-            if conc:
-                importe_programado += (act.cant_programada * conc.precio_unitario)
-
-        pct_fisico_prog = (
-            _redondear_2((importe_programado / obra.presupuesto_total) * Decimal("100.00"))
-            if obra.presupuesto_total > 0 else Decimal("0.00")
-        )
-        pct_fin_prog = (
-            _redondear_2((importe_programado / monto_contrato) * Decimal("100.00"))
-            if monto_contrato > 0 else Decimal("0.00")
-        )
-
-        # 2. Importe físico ejecutado real validado en Generadores_Validacion (RN-DIR-01.5)
-        generadores_obra = list(
-            session.exec(
-                select(Generadores)
-                .join(Estimaciones)
-                .where(Estimaciones.id_obra == obra.id_obra)
-            ).all()
-        )
-
-        importe_fisico_real = Decimal("0.00")
-        for gen in generadores_obra:
-            ult_val = session.exec(
-                select(GeneradoresValidacion)
-                .where(GeneradoresValidacion.id_generador == gen.id_generador)
-                .order_by(col(GeneradoresValidacion.version_revisada).desc())
-            ).first()
-            if ult_val:
-                conc = session.get(ConceptosCatalogo, gen.id_concepto)
-                if conc:
-                    importe_fisico_real += (ult_val.cant_aprobada * conc.precio_unitario)
-
-        pct_fisico_real = (
-            _redondear_2((importe_fisico_real / obra.presupuesto_total) * Decimal("100.00"))
-            if obra.presupuesto_total > 0 else Decimal("0.00")
-        )
-
-        # 3. Avance financiero real (RN-DIR-01.4)
+        # 2. Avance financiero real (RN-DIR-01.4)
         pagos = list(
             session.exec(
                 select(EstimacionesPagadas)
@@ -817,7 +626,6 @@ class DirectivoFiniquitoService:
         suma_pagada = sum((p.monto_pagado for p in pagos), Decimal("0.00"))
 
         if suma_pagada == Decimal("0.00"):
-            # Si aún no hay pagos liquidados, toma el monto autorizado neto de revisiones APROBADAS
             est_aprob = session.exec(
                 select(CatEstatus).where(CatEstatus.ambito == "REVISION", CatEstatus.clave == "APROBADA")
             ).first()
@@ -839,7 +647,7 @@ class DirectivoFiniquitoService:
             if obra.presupuesto_total > 0 else Decimal("0.00")
         )
 
-        # 4. Alertas normativas de 15 días en revisiones pendientes (RF-SUP-06)
+        # 3. Alertas normativas de 15 días en revisiones pendientes (RF-SUP-06)
         est_pend = session.exec(
             select(CatEstatus).where(CatEstatus.ambito == "REVISION", CatEstatus.clave == "PENDIENTE")
         ).first()
@@ -869,32 +677,62 @@ class DirectivoFiniquitoService:
 
         return {
             "monto_contrato": monto_contrato,
-            "pct_fisico_prog": min(Decimal("100.00"), pct_fisico_prog),
             "pct_fisico_real": min(Decimal("100.00"), pct_fisico_real),
-            "pct_fin_prog": min(Decimal("100.00"), pct_fin_prog),
             "pct_fin_real": min(Decimal("100.00"), pct_fin_real),
             "alertas": alertas,
         }
 
     @staticmethod
-    def registrar_corte_avance(session: Session, id_obra: int, fecha_corte: Optional[date] = None) -> AvancesFisicos:
+    def registrar_corte_avance(
+        session: Session,
+        id_obra: int,
+        porcentaje_fisico_nuevo: Optional[Decimal] = None,
+        fecha_corte: Optional[date] = None,
+        id_reporte: Optional[int] = None
+    ) -> AvancesFisicos:
+        """
+        RN-DIR-01.6, RN-DIR-01.7, RN-SUP-03.5 y RN-SUP-03.6:
+        - Garantiza que porcentaje_fisico_nuevo >= último porcentaje_fisico registrado.
+        - Garantiza que porcentaje_financiero_real <= porcentaje_fisico.
+        """
         obra = ObraContratoService.obtener_obra(session, id_obra)
         corte = fecha_corte or date.today()
         metricas = DirectivoFiniquitoService.calcular_avances_obra(session, obra, corte)
 
-        if metricas["pct_fin_real"] > metricas["pct_fisico_real"]:
+        avance_anterior = metricas["pct_fisico_real"]
+        pct_fisico_final = (
+            _redondear_2(porcentaje_fisico_nuevo)
+            if porcentaje_fisico_nuevo is not None
+            else avance_anterior
+        )
+
+        # RN-DIR-01.7 y RN-SUP-03.6: Regla de Progresividad / No Retroceso
+        if pct_fisico_final < avance_anterior:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="RN-DIR-01.6: Violación de control presupuestal: El avance financiero no puede superar al avance físico real ejecutado."
+                detail=(
+                    f"Inconsistencia de avance físico: El avance por registrar ({pct_fisico_final}%) "
+                    f"no puede ser menor al último avance registrado previamente ({avance_anterior}%)."
+                )
+            )
+        if pct_fisico_final < Decimal("0.00") or pct_fisico_final > Decimal("100.00"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El porcentaje de avance físico debe estar entre 0.00% y 100.00%."
+            )
+
+        if metricas["pct_fin_real"] > pct_fisico_final:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Violación de control presupuestal: El avance financiero no puede superar al avance físico real ejecutado"
             )
 
         nuevo_corte = AvancesFisicos(
             id_obra=obra.id_obra,
+            id_reporte=id_reporte,
             fecha_corte=corte,
-            porcentaje_fisico=metricas["pct_fisico_real"],
-            porcentaje_fisico_programado=metricas["pct_fisico_prog"],
-            porcentaje_financiero_real=metricas["pct_fin_real"],
-            porcentaje_financiero_programado=metricas["pct_fin_prog"]
+            porcentaje_fisico=pct_fisico_final,
+            porcentaje_financiero_real=metricas["pct_fin_real"]
         )
         session.add(nuevo_corte)
         session.commit()
@@ -916,9 +754,9 @@ class DirectivoFiniquitoService:
                     estado_general=est.clave if est else "DESCONOCIDO",
                     presupuesto_total=obra.presupuesto_total,
                     monto_contrato=m["monto_contrato"],
-                    avance_fisico_programado_pct=m["pct_fisico_prog"],
+                    fecha_inicio=obra.fecha_inicio,
+                    fecha_fin=obra.fecha_fin,
                     avance_fisico_real_pct=m["pct_fisico_real"],
-                    avance_financiero_programado_pct=m["pct_fin_prog"],
                     avance_financiero_real_pct=m["pct_fin_real"],
                     cumple_candado_fisico_financiero=(m["pct_fin_real"] <= m["pct_fisico_real"]),
                     alertas_plazo_revision=m["alertas"]
@@ -927,64 +765,12 @@ class DirectivoFiniquitoService:
         return tablero
 
     @staticmethod
-    def obtener_calendario_gantt_macro(session: Session) -> List[models.GanttMacroItem]:
-        """
-        RF-DIR-02 y RN-DIR-02.1: Diagrama de Gantt macro con semáforo de estado:
-        - VERDE (EN_TIEMPO): Avance físico real >= 95% del programado a la fecha actual.
-        - AMARILLO_ROJO (CON_ATRASO): Inferior al 95% del programado o fecha actual > fecha_fin sin estar TERMINADA/CERRADA.
-        - GRIS_ALERTA (SUSPENDIDA): Cuando la obra está en estado SUSPENDIDA.
-        """
-        hoy = date.today()
-        obras = list(session.exec(select(Obras)).all())
-        items: List[models.GanttMacroItem] = []
-
-        for obra in obras:
-            est = session.get(CatEstatus, obra.id_estatus)
-            clave_est = est.clave if est else "EN_CONFIGURACION"
-            contrato = session.exec(select(Contratos).where(Contratos.id_obra == obra.id_obra)).first()
-            m = DirectivoFiniquitoService.calcular_avances_obra(session, obra, hoy)
-
-            prog = m["pct_fisico_prog"]
-            real = m["pct_fisico_real"]
-
-            if clave_est == "SUSPENDIDA":
-                semaforo = "GRIS_ALERTA (SUSPENDIDA)"
-            elif hoy > obra.fecha_fin and clave_est not in {"FINIQUITADA", "CERRADA"}:
-                semaforo = "AMARILLO_ROJO (CON_ATRASO)"
-            elif prog > Decimal("0.00") and real < _redondear_2(prog * Decimal("0.95")):
-                semaforo = "AMARILLO_ROJO (CON_ATRASO)"
-            else:
-                semaforo = "VERDE (EN_TIEMPO)"
-
-            items.append(
-                models.GanttMacroItem(
-                    id_obra=obra.id_obra,
-                    nombre_obra=obra.nombre_obra,
-                    numero_contrato=contrato.numero_contrato if contrato else None,
-                    fecha_inicio=obra.fecha_inicio,
-                    fecha_fin=obra.fecha_fin,
-                    estado_general=clave_est,
-                    avance_programado_pct=prog,
-                    avance_real_pct=real,
-                    semaforo=semaforo
-                )
-            )
-        return items
-
-    @staticmethod
     def exportar_reporte_financiero(
         session: Session, id_obra: int, usuario: Usuarios, ip_origen: str
     ) -> models.ReporteGerencialFinanciero:
-        """
-        RF-DIR-04 (RN-DIR-04.1 y RN-DIR-04.2): Consolida datos financieros y registra
-        obligatoriamente la descarga en Auditoría Logs con fecha, hora e IP del Directivo.
-        """
         obra = ObraContratoService.obtener_obra(session, id_obra)
         contrato = session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).first()
-        contratista = (
-            session.get(Contratistas, contrato.id_contratista)
-            if contrato else None
-        )
+        contratista = session.get(Contratistas, contrato.id_contratista) if contrato else None
 
         estimaciones = list(session.exec(select(Estimaciones).where(Estimaciones.id_obra == id_obra)).all())
         monto_bruto = sum((e.monto_bruto for e in estimaciones), Decimal("0.00"))
@@ -1018,8 +804,8 @@ class DirectivoFiniquitoService:
 
         presupuesto_base = contrato.monto_contrato if contrato else obra.presupuesto_total
         saldo_pendiente = max(Decimal("0.00"), presupuesto_base - monto_liquidado)
+        metricas = DirectivoFiniquitoService.calcular_avances_obra(session, obra)
 
-        # RN-DIR-04.2: Trazabilidad de descarga en Auditoría Logs
         AuditoriaService.registrar_evento(
             session=session,
             id_usuario=usuario.id_usuario,
@@ -1041,6 +827,8 @@ class DirectivoFiniquitoService:
             monto_neto_autorizado=monto_neto_aut,
             monto_efectivamente_liquidado=monto_liquidado,
             saldo_pendiente_por_ejercer=saldo_pendiente,
+            avance_fisico_real_pct=metricas["pct_fisico_real"],
+            avance_financiero_real_pct=metricas["pct_fin_real"],
             fecha_generacion=date.today()
         )
 
@@ -1052,11 +840,6 @@ class DirectivoFiniquitoService:
         residente: Usuarios,
         ip_origen: str
     ) -> models.ActaFiniquitoResumen:
-        """
-        RF-RES-05 (RN-RES-05.1 y RN-RES-05.2): Genera Acta de Recepción Física y Finiquito,
-        verificando precondiciones estrictas (Aviso de Terminación con >= 6 fotos y 100% de
-        estimaciones liquidadas) y pasando Obra y Contrato a FINIQUITADA / CERRADA.
-        """
         obra = ObraContratoService.obtener_obra(session, id_obra)
         contrato = session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).first()
         if not contrato:
@@ -1069,7 +852,6 @@ class DirectivoFiniquitoService:
             referencia=f"FINIQUITO-OBRA:{id_obra}"
         )
 
-        # Precondición 1: Nota de AVISO_TERMINACION firmada por Superintendente con mínimo 6 fotos
         tipo_aviso = session.exec(
             select(CatTipoNotaBitacora).where(CatTipoNotaBitacora.clave == "AVISO_TERMINACION")
         ).first()
@@ -1099,7 +881,6 @@ class DirectivoFiniquitoService:
                 detail=f"RF-RES-05 / RN-SUPT-05.2: El Aviso de Terminación requiere mínimo 6 fotografías (actuales: {num_fotos})."
             )
 
-        # Precondición 2: Ninguna estimación pendiente; todas deben estar LIQUIDADAS en Estimaciones_Pagadas
         estimaciones = list(session.exec(select(Estimaciones).where(Estimaciones.id_obra == id_obra)).all())
         monto_ord = Decimal("0.00")
         monto_adic = Decimal("0.00")
@@ -1129,7 +910,6 @@ class DirectivoFiniquitoService:
             total_amortizado += est.monto_amortizacion
             saldo_liquidado += pago.monto_pagado
 
-        # RN-RES-05.2: Cambiar estado de Obra y Contrato a FINIQUITADA / FINIQUITADO
         est_obra_fin = session.exec(
             select(CatEstatus).where(CatEstatus.ambito == "OBRA", CatEstatus.clave == "FINIQUITADA")
         ).first()

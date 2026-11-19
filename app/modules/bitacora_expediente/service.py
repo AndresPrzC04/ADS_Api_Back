@@ -1,4 +1,5 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import List
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, func, select
@@ -15,13 +16,12 @@ from app.models_base import (
     Contratos,
     ControlCalidadPruebas,
     EvidenciaAdjunta,
-    Generadores,
     Obras,
-    ProgramaEjecucion,
     ReporteDiarioSupervision,
     Usuarios,
 )
-from app.modules.usuario_accesos.service import AuditoriaService
+from app.modules.obras_contratos.service import DirectivoFiniquitoService
+from app.modules.usuarios_accesos.service import AuditoriaService
 from . import models
 
 TIPOS_PERMITIDOS_POR_ROL = {
@@ -49,16 +49,11 @@ TIPOS_PERMITIDOS_POR_ROL = {
 
 
 # ==========================================
-# 1. SERVICIO: BITÁCORA ELECTRÓNICA INMUTABLE Y RECALENDARIZACIÓN (RF-RES-01, RF-RES-02, RF-SUPT-05, RF-SUP-03, RF-SYS-01)
+# 1. SERVICIO: BITÁCORA ELECTRÓNICA INMUTABLE Y RECALENDARIZACIÓN CONTRACTUAL
 # ==========================================
 class BitacoraService:
     @staticmethod
     def _verificar_bitacora_no_cerrada(session: Session, id_obra: int) -> None:
-        """
-        RN-RES-01.2: Cuando el Residente registra y firma la nota de CIERRE, el backend bloquea
-        de forma irreversible cualquier petición POST, PUT, PATCH o DELETE sobre Bitacora_notas
-        y Evidencia_adjunta con HTTP 403 Forbidden.
-        """
         tipo_cierre = session.exec(
             select(CatTipoNotaBitacora).where(CatTipoNotaBitacora.clave == "CIERRE")
         ).first()
@@ -110,10 +105,8 @@ class BitacoraService:
         if not obra:
             raise HTTPException(status_code=404, detail="La obra especificada no existe.")
 
-        # RN-RES-01.2: Verificar que la bitácora no esté cerrada y congelada
         BitacoraService._verificar_bitacora_no_cerrada(session, obra.id_obra)
 
-        # RN-ADM-04.3: Bloqueo preventivo si la obra está EN_CONFIGURACION o ALERTA_VACANTE_OPERATIVA
         est_obra = session.get(CatEstatus, obra.id_estatus)
         clave_est_obra = est_obra.clave if est_obra else ""
         if clave_est_obra in {"EN_CONFIGURACION", "ALERTA_VACANTE_OPERATIVA"}:
@@ -128,7 +121,6 @@ class BitacoraService:
         rol_nombre = usuario.rol.nombre.upper() if usuario.rol else ""
         clave_tipo = nota_in.clave_tipo_nota.strip().upper()
 
-        # RN-SUPT-05.1, RN-SUP-03.1 y RF-RES-01: Validar tipos de nota permitidos por rol
         permitidos = TIPOS_PERMITIDOS_POR_ROL.get(rol_nombre, set())
         if clave_tipo not in permitidos:
             raise HTTPException(
@@ -152,7 +144,6 @@ class BitacoraService:
             select(func.max(col(BitacoraNotas.consecutivo_nota))).where(BitacoraNotas.id_obra == obra.id_obra)
         ).one() or 0
 
-        # RN-RES-01.1: Regla de la Nota #1 - Apertura
         if ultimo_consecutivo == 0:
             if clave_tipo != "APERTURA" or rol_nombre != "RESIDENTE":
                 raise HTTPException(
@@ -168,7 +159,6 @@ class BitacoraService:
                     status_code=400,
                     detail="La obra ya cuenta con su Nota #1 de Apertura de Bitácora."
                 )
-            # Verificar que la Nota #1 de APERTURA esté firmada antes de permitir notas subsecuentes
             nota_uno = session.exec(
                 select(BitacoraNotas).where(
                     BitacoraNotas.id_obra == obra.id_obra,
@@ -181,7 +171,6 @@ class BitacoraService:
                     detail="RN-RES-01.1: La Nota #1 de APERTURA debe estar firmada electrónicamente por el Residente."
                 )
 
-        # RN-RES-02.1: Habilitación de Cantidades Adicionales por el Residente
         if nota_in.id_concepto_adicional is not None and nota_in.cantidad_adicional_autorizada is not None:
             if rol_nombre != "RESIDENTE":
                 raise HTTPException(
@@ -227,14 +216,6 @@ class BitacoraService:
         usuario: Usuarios,
         ip_origen: str
     ) -> models.BitacoraNotaPublic:
-        """
-        RNF-SEG-02, RNF-SEG-04, RN-SUPT-05.2, RN-RES-01.2 y RN-RES-02.2 (RF-SYS-01):
-        - Valida que el autor de la nota sea quien firma y verifica su firma electrónica.
-        - Si es AVISO_TERMINACION, exige mínimo 6 fotografías en Evidencia_adjunta.
-        - Si es SUSPENSION_TEMPORAL, pasa la obra a SUSPENDIDA.
-        - Si es REANUDACION, calcula Δdías y desplaza automáticamente fechas en Programa_ejecucion y Obras.
-        - Si es CIERRE, congela la bitácora y pasa la obra/contrato a CERRADA/FINIQUITADA.
-        """
         nota = session.get(BitacoraNotas, id_nota)
         if not nota:
             raise HTTPException(status_code=404, detail="Nota de bitácora no encontrada.")
@@ -256,7 +237,6 @@ class BitacoraService:
         tipo_cat = session.get(CatTipoNotaBitacora, nota.id_tipo_nota)
         clave_tipo = tipo_cat.clave if tipo_cat else ""
 
-        # RN-SUPT-05.2: Regla de las 6 evidencias en Aviso de Terminación
         if tipo_cat and tipo_cat.min_imagenes > 0:
             total_fotos = session.exec(
                 select(func.count(col(EvidenciaAdjunta.id_evidencia))).where(
@@ -285,7 +265,7 @@ class BitacoraService:
 
         obra = session.get(Obras, nota.id_obra)
 
-        # RN-RES-02.2 / RF-SYS-01: Suspensión temporal y Reanudación con recalendarización automática
+        # RN-RES-02.2 / RF-SYS-01: Suspensión y Reanudación sobre fecha_fin de Obras (sin Gantt)
         if clave_tipo == "SUSPENSION_TEMPORAL" and obra:
             est_susp = session.exec(
                 select(CatEstatus).where(CatEstatus.ambito == "OBRA", CatEstatus.clave == "SUSPENDIDA")
@@ -314,21 +294,6 @@ class BitacoraService:
             fecha_rean = nota.fecha_registro.date()
             delta_dias = max(1, (fecha_rean - fecha_susp).days)
 
-            # Desplazar fecha_fin_prog pendientes en Programa_ejecucion y fecha_fin en Obras
-            actividades = list(
-                session.exec(
-                    select(ProgramaEjecucion)
-                    .join(ConceptosCatalogo)
-                    .where(
-                        ConceptosCatalogo.id_obra == obra.id_obra,
-                        col(ProgramaEjecucion.fecha_fin_prog) >= fecha_susp
-                    )
-                ).all()
-            )
-            for act in actividades:
-                act.fecha_fin_prog = act.fecha_fin_prog + timedelta(days=delta_dias)
-                session.add(act)
-
             obra.fecha_fin = obra.fecha_fin + timedelta(days=delta_dias)
             est_eje = session.exec(
                 select(CatEstatus).where(CatEstatus.ambito == "OBRA", CatEstatus.clave == "EN_EJECUCION")
@@ -338,7 +303,6 @@ class BitacoraService:
             session.add(obra)
 
         elif clave_tipo == "CIERRE" and obra:
-            # RN-RES-05.2: Al firmar la nota de CIERRE, Obra y Contrato pasan a FINIQUITADA / CERRADA
             est_cerrada = session.exec(
                 select(CatEstatus).where(CatEstatus.ambito == "OBRA", CatEstatus.clave == "FINIQUITADA")
             ).first()
@@ -371,7 +335,6 @@ class BitacoraService:
     def consultar_paginado(
         session: Session, id_obra: int, skip: int = 0, limit: int = 20
     ) -> List[models.BitacoraNotaPublic]:
-        """RN-DIR-03.2 y RNF-REN-03: Paginación obligatoria en consulta de notas de bitácora."""
         limit_seguro = min(max(1, limit), 100)
         notas = list(
             session.exec(
@@ -386,23 +349,21 @@ class BitacoraService:
 
 
 # ==========================================
-# 2. SERVICIO: EVIDENCIA FOTOGRÁFICA ADJUNTA (RF-SUPT-04, RF-SUPT-05, RN-SUPT-05.3)
+# 2. SERVICIO: EVIDENCIA FOTOGRÁFICA ADJUNTA (Bitácora o Reporte de Supervisión)
 # ==========================================
 class EvidenciaService:
     @staticmethod
     def agregar_evidencia(
         session: Session, ev_in: models.EvidenciaAdjuntaCreate
     ) -> EvidenciaAdjunta:
-        # Validar origen único (chk_evidencia_origen_unico)
         tiene_nota = ev_in.id_nota is not None
-        tiene_gen = ev_in.id_generador is not None
-        if tiene_nota == tiene_gen:
+        tiene_reporte = ev_in.id_reporte is not None
+        if tiene_nota == tiene_reporte:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Debe vincular la evidencia exactamente a una nota de bitácora (id_nota) o a un generador (id_generador), no a ambos."
+                detail="Debe vincular la evidencia exactamente a una nota de bitácora (id_nota) o a un reporte de supervisión (id_reporte), no a ambos."
             )
 
-        # RN-SUPT-04.2 y RNF-USA-05: Validar formato permitido (.pdf, .jpg, .jpeg, .png)
         validar_formato_y_tamano_archivo(ev_in.ruta_archivo, (".pdf", ".jpg", ".jpeg", ".png"))
 
         if ev_in.id_nota is not None:
@@ -415,14 +376,19 @@ class EvidenciaService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="RN-SUPT-05.3 / RNF-SEG-02: No se pueden agregar evidencias a una nota de bitácora ya firmada."
                 )
-        elif ev_in.id_generador is not None:
-            gen = session.get(Generadores, ev_in.id_generador)
-            if not gen:
-                raise HTTPException(status_code=404, detail="Generador no encontrado.")
+        elif ev_in.id_reporte is not None:
+            reporte = session.get(ReporteDiarioSupervision, ev_in.id_reporte)
+            if not reporte:
+                raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
+            if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="RN-SUP-03.4 / RNF-SEG-02: No se pueden agregar evidencias a un reporte de supervisión ya firmado."
+                )
 
         nueva_ev = EvidenciaAdjunta(
             id_nota=ev_in.id_nota,
-            id_generador=ev_in.id_generador,
+            id_reporte=ev_in.id_reporte,
             ruta_archivo=ev_in.ruta_archivo,
             descripcion_pie_foto=ev_in.descripcion_pie_foto
         )
@@ -446,6 +412,13 @@ class EvidenciaService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="RN-SUPT-05.3 / RNF-SEG-02: Prohibido eliminar evidencias de una nota de bitácora ya firmada."
                     )
+        elif ev.id_reporte is not None:
+            reporte = session.get(ReporteDiarioSupervision, ev.id_reporte)
+            if reporte and (reporte.firmado or reporte.estatus_reporte == "FIRMADO"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="RN-SUP-03.4 / RNF-SEG-02: Prohibido eliminar evidencias de un reporte de supervisión ya firmado."
+                )
 
         session.delete(ev)
         session.commit()
@@ -453,14 +426,304 @@ class EvidenciaService:
 
 
 # ==========================================
-# 3. SERVICIO: CONTROL DE CALIDAD Y REPORTE DIARIO DE SUPERVISIÓN (RF-SUP-03)
+# 3. SERVICIO: CONTROL DE CALIDAD Y REPORTE DE SUPERVISIÓN CON AVANCE FÍSICO (RF-SUP-03)
 # ==========================================
 class SupervisionCalidadService:
+    @staticmethod
+    def _enriquecer_reporte(
+        session: Session,
+        reporte: ReporteDiarioSupervision,
+        advertencia_calidad: str | None = None
+    ) -> models.ReporteDiarioSupervisionPublic:
+        evidencias = list(
+            session.exec(
+                select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_reporte == reporte.id_reporte)
+            ).all()
+        )
+        return models.ReporteDiarioSupervisionPublic(
+            **reporte.model_dump(),
+            evidencias=[models.EvidenciaAdjuntaPublic(**e.model_dump()) for e in evidencias],
+            advertencia_calidad=advertencia_calidad
+        )
+
+    @staticmethod
+    def _validar_progresividad_avance(session: Session, id_obra: int, porcentaje_nuevo: Decimal) -> None:
+        """
+        RN-SUP-03.6 y RN-DIR-01.7: Verifica que el porcentaje por registrar sea mayor o igual
+        al último avance físico registrado en Avances_Fisicos para la obra.
+        """
+        ultimo_avance = DirectivoFiniquitoService.obtener_ultimo_avance_fisico(session, id_obra)
+        if porcentaje_nuevo < ultimo_avance:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Inconsistencia de avance físico: El avance por registrar ({porcentaje_nuevo}%) "
+                    f"no puede ser menor al último avance registrado previamente ({ultimo_avance}%)."
+                )
+            )
+        if porcentaje_nuevo < Decimal("0.00") or porcentaje_nuevo > Decimal("100.00"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El porcentaje de avance físico debe encontrarse en el rango de 0.00% a 100.00%."
+            )
+
+    @staticmethod
+    def _obra_tiene_ensayos_rechazados(session: Session, id_obra: int) -> bool:
+        est_rech = session.exec(
+            select(CatEstatus).where(CatEstatus.ambito == "CALIDAD", CatEstatus.clave == "RECHAZADO")
+        ).first()
+        if not est_rech:
+            return False
+        prueba = session.exec(
+            select(ControlCalidadPruebas)
+            .join(ConceptosCatalogo)
+            .where(
+                ConceptosCatalogo.id_obra == id_obra,
+                ControlCalidadPruebas.id_estatus_dictamen == est_rech.id_estatus
+            )
+        ).first()
+        return prueba is not None
+
+    @staticmethod
+    def crear_reporte_borrador(
+        session: Session,
+        reporte_in: models.ReporteDiarioSupervisionCreate,
+        supervisor: Usuarios
+    ) -> models.ReporteDiarioSupervisionPublic:
+        """
+        RF-SUP-03 (RN-SUP-03.2, RN-SUP-03.4, RN-SUP-03.6):
+        Crea el reporte en estado BORRADOR permitiendo dejar campos incompletos sin enviar.
+        """
+        obra = session.get(Obras, reporte_in.id_obra)
+        if not obra:
+            raise HTTPException(status_code=404, detail="Obra no encontrada.")
+
+        est_obra = session.get(CatEstatus, obra.id_estatus)
+        if not est_obra or est_obra.clave != "EN_EJECUCION":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"RF-SUP-03: La obra debe estar EN_EJECUCION para crear reportes (estado actual: {est_obra.clave if est_obra else 'DESCONOCIDO'})."
+            )
+
+        existente = session.exec(
+            select(ReporteDiarioSupervision).where(
+                ReporteDiarioSupervision.id_obra == reporte_in.id_obra,
+                ReporteDiarioSupervision.fecha_reporte == reporte_in.fecha_reporte
+            )
+        ).first()
+        if existente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"RN-SUP-03.2: Ya existe un reporte de supervisión para la obra en la fecha {reporte_in.fecha_reporte}."
+            )
+
+        if reporte_in.porcentaje_avance_reportado is not None:
+            SupervisionCalidadService._validar_progresividad_avance(
+                session, obra.id_obra, reporte_in.porcentaje_avance_reportado
+            )
+
+        nuevo = ReporteDiarioSupervision(
+            id_obra=reporte_in.id_obra,
+            id_supervisor=supervisor.id_usuario,
+            fecha_reporte=reporte_in.fecha_reporte,
+            estatus_reporte="BORRADOR",
+            clima=reporte_in.clima,
+            estado_fuerza_trabajo=reporte_in.estado_fuerza_trabajo,
+            maquinaria_activa=reporte_in.maquinaria_activa,
+            incidencias_relevantes=reporte_in.incidencias_relevantes,
+            porcentaje_avance_reportado=reporte_in.porcentaje_avance_reportado,
+            firmado=False,
+            sello_digital=None
+        )
+        session.add(nuevo)
+        session.commit()
+        session.refresh(nuevo)
+        return SupervisionCalidadService._enriquecer_reporte(session, nuevo)
+
+    @staticmethod
+    def actualizar_reporte(
+        session: Session,
+        id_reporte: int,
+        reporte_in: models.ReporteDiarioSupervisionUpdate
+    ) -> models.ReporteDiarioSupervisionPublic:
+        """
+        RN-SUP-03.4: Permite modificar el reporte tanto en BORRADOR como en ENVIADO,
+        siempre y cuando aún NO haya sido firmado electrónicamente (firmado == False).
+        """
+        reporte = session.get(ReporteDiarioSupervision, id_reporte)
+        if not reporte:
+            raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
+
+        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="RN-SUP-03.4 / RNF-SEG-02: El reporte ya fue firmado electrónicamente y es inmutable."
+            )
+
+        if reporte_in.porcentaje_avance_reportado is not None:
+            SupervisionCalidadService._validar_progresividad_avance(
+                session, reporte.id_obra, reporte_in.porcentaje_avance_reportado
+            )
+
+        datos = reporte_in.model_dump(exclude_unset=True)
+        for campo, valor in datos.items():
+            setattr(reporte, campo, valor)
+
+        session.add(reporte)
+        session.commit()
+        session.refresh(reporte)
+        return SupervisionCalidadService._enriquecer_reporte(session, reporte)
+
+    @staticmethod
+    def enviar_reporte(
+        session: Session, id_reporte: int
+    ) -> models.ReporteDiarioSupervisionPublic:
+        """
+        RN-SUP-03.4: Valida que todos los campos obligatorios estén completos para pasar
+        de BORRADOR a ENVIADO (sigue siendo editable mientras no se firme).
+        """
+        reporte = session.get(ReporteDiarioSupervision, id_reporte)
+        if not reporte:
+            raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
+
+        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+            raise HTTPException(
+                status_code=400,
+                detail="Este reporte ya fue firmado y cerrado."
+            )
+
+        faltantes = []
+        if not reporte.clima or not reporte.clima.strip():
+            faltantes.append("clima")
+        if reporte.estado_fuerza_trabajo is None:
+            faltantes.append("estado_fuerza_trabajo")
+        if reporte.porcentaje_avance_reportado is None:
+            faltantes.append("porcentaje_avance_reportado")
+        if not reporte.maquinaria_activa or not reporte.maquinaria_activa.strip():
+            faltantes.append("maquinaria_activa")
+        if not reporte.incidencias_relevantes or not reporte.incidencias_relevantes.strip():
+            faltantes.append("incidencias_relevantes")
+
+        if faltantes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"RN-SUP-03.4: Para enviar el reporte debe completar los campos obligatorios: {', '.join(faltantes)}."
+            )
+
+        if reporte.porcentaje_avance_reportado is not None:
+            SupervisionCalidadService._validar_progresividad_avance(
+                session, reporte.id_obra, reporte.porcentaje_avance_reportado
+            )
+
+        reporte.estatus_reporte = "ENVIADO"
+        reporte.fecha_envio = datetime.now(timezone.utc)
+        session.add(reporte)
+        session.commit()
+        session.refresh(reporte)
+        return SupervisionCalidadService._enriquecer_reporte(session, reporte)
+
+    @staticmethod
+    def firmar_reporte(
+        session: Session,
+        id_reporte: int,
+        firma_in: models.ReporteDiarioFirmaInput,
+        supervisor: Usuarios,
+        ip_origen: str
+    ) -> models.ReporteDiarioSupervisionPublic:
+        """
+        RN-SUP-03.4, RN-SUP-03.5 y RN-SUP-03.6:
+        - Requiere que el reporte esté en estado ENVIADO (completo) y sin firmar.
+        - Valida la firma electrónica del Supervisor (RNF-SEG-04) y bloquea el reporte (RNF-SEG-02).
+        - Inserta automáticamente el nuevo corte oficial en Avances_Fisicos validando progresividad.
+        """
+        reporte = session.get(ReporteDiarioSupervision, id_reporte)
+        if not reporte:
+            raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
+
+        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="RNF-SEG-02: Este reporte ya cuenta con firma electrónica y es inmutable."
+            )
+
+        if reporte.estatus_reporte != "ENVIADO":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="RN-SUP-03.4: Debe completar y enviar el reporte (estado ENVIADO) antes de poder firmarlo."
+            )
+
+        if reporte.porcentaje_avance_reportado is None:
+            raise HTTPException(
+                status_code=400,
+                detail="El reporte debe incluir 'porcentaje_avance_reportado' antes de firmarse."
+            )
+
+        SupervisionCalidadService._validar_progresividad_avance(
+            session, reporte.id_obra, reporte.porcentaje_avance_reportado
+        )
+
+        sello = validar_firma_electronica_y_generar_sello(
+            firma_plana=firma_in.firma_electronica_supervisor,
+            firma_hash_usuario=supervisor.firma_electronica,
+            id_usuario=supervisor.id_usuario,
+            referencia=f"REPORTE-SUP:{reporte.id_reporte}-OBRA:{reporte.id_obra}"
+        )
+
+        reporte.estatus_reporte = "FIRMADO"
+        reporte.firmado = True
+        reporte.sello_digital = sello
+        reporte.fecha_firma = datetime.now(timezone.utc)
+        session.add(reporte)
+        session.commit()
+        session.refresh(reporte)
+
+        # RN-SUP-03.5: Interacción automática Reporte de Supervisión -> Avances_Fisicos
+        DirectivoFiniquitoService.registrar_corte_avance(
+            session=session,
+            id_obra=reporte.id_obra,
+            porcentaje_fisico_nuevo=reporte.porcentaje_avance_reportado,
+            fecha_corte=reporte.fecha_reporte,
+            id_reporte=reporte.id_reporte
+        )
+
+        AuditoriaService.registrar_evento(
+            session=session,
+            id_usuario=supervisor.id_usuario,
+            id_obra=reporte.id_obra,
+            tipo_accion="FIRMA",
+            accion_ejecutada=f"FIRMA_REPORTE_SUPERVISION_{reporte.id_reporte}",
+            descripcion=f"Firma de reporte de supervisión del {reporte.fecha_reporte} con avance {reporte.porcentaje_avance_reportado}%",
+            ip_origen=ip_origen
+        )
+
+        advertencia = None
+        if SupervisionCalidadService._obra_tiene_ensayos_rechazados(session, reporte.id_obra):
+            advertencia = (
+                "ADVERTENCIA (RN-SUP-03.3): Esta obra cuenta con ensayos de laboratorio dictaminados como RECHAZADO."
+            )
+
+        return SupervisionCalidadService._enriquecer_reporte(session, reporte, advertencia_calidad=advertencia)
+
+    @staticmethod
+    def consultar_reportes_diarios(
+        session: Session, id_obra: int, skip: int = 0, limit: int = 20
+    ) -> List[models.ReporteDiarioSupervisionPublic]:
+        limit_seguro = min(max(1, limit), 100)
+        reportes = list(
+            session.exec(
+                select(ReporteDiarioSupervision)
+                .where(ReporteDiarioSupervision.id_obra == id_obra)
+                .order_by(col(ReporteDiarioSupervision.fecha_reporte).desc())
+                .offset(max(0, skip))
+                .limit(limit_seguro)
+            ).all()
+        )
+        return [SupervisionCalidadService._enriquecer_reporte(session, r) for r in reportes]
+
     @staticmethod
     def registrar_prueba_calidad(
         session: Session, prueba_in: models.ControlCalidadPruebaCreate
     ) -> models.ControlCalidadPruebaPublic:
-        """RN-SUP-03.3: Registro de ensayos de laboratorio por concepto en 3NF."""
         concepto = session.get(ConceptosCatalogo, prueba_in.id_concepto)
         if not concepto:
             raise HTTPException(status_code=404, detail="Concepto no encontrado.")
@@ -518,50 +781,3 @@ class SupervisionCalidadService:
                 )
             )
         return resultado
-
-    @staticmethod
-    def crear_reporte_diario(
-        session: Session, reporte_in: models.ReporteDiarioSupervisionCreate, supervisor: Usuarios
-    ) -> ReporteDiarioSupervision:
-        """RN-SUP-03.2: Máximo un reporte diario de supervisión por obra y fecha."""
-        obra = session.get(Obras, reporte_in.id_obra)
-        if not obra:
-            raise HTTPException(status_code=404, detail="Obra no encontrada.")
-
-        existente = session.exec(
-            select(ReporteDiarioSupervision).where(
-                ReporteDiarioSupervision.id_obra == reporte_in.id_obra,
-                ReporteDiarioSupervision.fecha_reporte == reporte_in.fecha_reporte
-            )
-        ).first()
-        if existente:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"RN-SUP-03.2: Ya existe un reporte diario de supervisión para la obra en la fecha {reporte_in.fecha_reporte}."
-            )
-
-        nuevo = ReporteDiarioSupervision(
-            id_obra=reporte_in.id_obra,
-            id_supervisor=supervisor.id_usuario,
-            fecha_reporte=reporte_in.fecha_reporte,
-            clima=reporte_in.clima,
-            estado_fuerza_trabajo=reporte_in.estado_fuerza_trabajo,
-            maquinaria_activa=reporte_in.maquinaria_activa,
-            incidencias_relevantes=reporte_in.incidencias_relevantes
-        )
-        session.add(nuevo)
-        session.commit()
-        session.refresh(nuevo)
-        return nuevo
-
-    @staticmethod
-    def consultar_reportes_diarios(
-        session: Session, id_obra: int
-    ) -> List[ReporteDiarioSupervision]:
-        return list(
-            session.exec(
-                select(ReporteDiarioSupervision)
-                .where(ReporteDiarioSupervision.id_obra == id_obra)
-                .order_by(col(ReporteDiarioSupervision.fecha_reporte).desc())
-            ).all()
-        )

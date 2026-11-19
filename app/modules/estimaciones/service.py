@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List
 from fastapi import HTTPException, status
-from sqlmodel import Session, col, func, or_, select
+from sqlmodel import Session, col, or_, select
 from app.core.security import (
     validar_firma_electronica_y_generar_sello,
     validar_formato_y_tamano_archivo,
@@ -10,7 +10,6 @@ from app.core.security import (
 from app.models_base import (
     BitacoraNotas,
     CatEstatus,
-    CatTipoConcepto,
     CatTipoEstimacion,
     CatTipoNotaBitacora,
     ConceptosCatalogo,
@@ -18,13 +17,10 @@ from app.models_base import (
     ControlCalidadPruebas,
     Estimaciones,
     EstimacionesPagadas,
-    EvidenciaAdjunta,
     FacturacionEstimacion,
-    Generadores,
-    GeneradoresValidacion,
     Obras,
     ObrasAsignaciones,
-    ProgramaEjecucion,
+    ReporteDiarioSupervision,
     RevisionEstimaciones,
     RolUsuario,
     Usuarios,
@@ -77,31 +73,6 @@ class EstimacionService:
         )
 
     @staticmethod
-    def recalcular_montos(session: Session, estimacion: Estimaciones) -> None:
-        """
-        RN-SUPT-03.5: El sistema calcula automáticamente:
-        monto_bruto = Σ(cant_ejecutada * precio_unitario)
-        monto_neto = monto_bruto - monto_amortizacion
-        """
-        generadores = list(
-            session.exec(
-                select(Generadores).where(Generadores.id_estimacion == estimacion.id_estimacion)
-            ).all()
-        )
-
-        total_bruto = Decimal("0.00")
-        for gen in generadores:
-            concepto = session.get(ConceptosCatalogo, gen.id_concepto)
-            if concepto:
-                total_bruto += _redondear_2(gen.cant_ejecutada * concepto.precio_unitario)
-
-        estimacion.monto_bruto = _redondear_2(total_bruto)
-        estimacion.monto_neto = max(Decimal("0.00"), _redondear_2(total_bruto - estimacion.monto_amortizacion))
-        session.add(estimacion)
-        session.commit()
-        session.refresh(estimacion)
-
-    @staticmethod
     def crear_borrador(
         session: Session,
         estimacion_in: models.EstimacionCreate,
@@ -112,7 +83,6 @@ class EstimacionService:
         if not obra:
             raise HTTPException(status_code=404, detail="La obra especificada no existe.")
 
-        # RN-ADM-04.3 y Precondiciones RF-SUPT-03: La obra debe estar EN_EJECUCION
         est_obra = session.get(CatEstatus, obra.id_estatus)
         if not est_obra or est_obra.clave != "EN_EJECUCION":
             raise HTTPException(
@@ -123,7 +93,6 @@ class EstimacionService:
                 )
             )
 
-        # Precondición RF-SUPT-03: Debe existir Nota de Apertura firmada en Bitácora
         tipo_apertura = session.exec(
             select(CatTipoNotaBitacora).where(CatTipoNotaBitacora.clave == "APERTURA")
         ).first()
@@ -142,29 +111,29 @@ class EstimacionService:
                 detail="RF-SUPT-03: Precondición incumplida. La obra requiere Nota de Apertura firmada por el Residente."
             )
 
-        # Precondición RF-SUPT-03: Debe tener cargado Catálogo de Conceptos y Programa de Ejecución
         tiene_catalogo = session.exec(
             select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == obra.id_obra)
         ).first()
-        tiene_programa = session.exec(
-            select(ProgramaEjecucion)
-            .join(ConceptosCatalogo)
-            .where(ConceptosCatalogo.id_obra == obra.id_obra)
-        ).first()
-        if not tiene_catalogo or not tiene_programa:
+        if not tiene_catalogo:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="RF-SUPT-03: La obra debe contar con Catálogo de Conceptos y Programa de Ejecución cargados."
+                detail="RF-SUPT-03: La obra debe contar con su Catálogo de Conceptos cargado."
             )
 
         if estimacion_in.periodo_fin < estimacion_in.periodo_inicio:
             raise HTTPException(status_code=400, detail="La fecha fin del periodo no puede ser menor a la de inicio.")
 
+        if estimacion_in.monto_amortizacion > estimacion_in.monto_bruto:
+            raise HTTPException(
+                status_code=400,
+                detail="El monto de amortización no puede ser mayor al monto bruto de la estimación."
+            )
+
         tipo_est = session.get(CatTipoEstimacion, estimacion_in.id_tipo_estimacion)
         if not tipo_est or not tipo_est.activo:
             raise HTTPException(status_code=404, detail="Tipo de estimación no encontrado o inactivo.")
 
-        # RN-SUPT-03.4: Secuencia de número de estimación y no traslape de periodos en ordinarias
+        # RN-SUPT-03.7: Secuencia y no traslape de periodos en estimaciones ordinarias
         duplicado_num = session.exec(
             select(Estimaciones).where(
                 Estimaciones.id_obra == obra.id_obra,
@@ -174,7 +143,7 @@ class EstimacionService:
         if duplicado_num:
             raise HTTPException(
                 status_code=400,
-                detail=f"RN-SUPT-03.4: Ya existe la estimación #{estimacion_in.numero_estimacion} en esta obra."
+                detail=f"RN-SUPT-03.7: Ya existe la estimación #{estimacion_in.numero_estimacion} en esta obra."
             )
 
         if tipo_est.clave == "ORDINARIA":
@@ -194,13 +163,18 @@ class EstimacionService:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
-                            f"RN-SUPT-03.4: El periodo ({estimacion_in.periodo_inicio} a {estimacion_in.periodo_fin}) "
+                            f"RN-SUPT-03.7: El periodo ({estimacion_in.periodo_inicio} a {estimacion_in.periodo_fin}) "
                             f"se traslapa con la estimación ordinaria #{prev.numero_estimacion} "
                             f"({prev.periodo_inicio} a {prev.periodo_fin})."
                         )
                     )
 
         id_borrador = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "BORRADOR")
+        monto_neto_calc = max(
+            Decimal("0.00"),
+            _redondear_2(estimacion_in.monto_bruto - estimacion_in.monto_amortizacion)
+        )
+
         nueva = Estimaciones(
             id_obra=obra.id_obra,
             id_superintendente=superintendente.id_usuario,
@@ -211,9 +185,9 @@ class EstimacionService:
             periodo_inicio=estimacion_in.periodo_inicio,
             periodo_fin=estimacion_in.periodo_fin,
             fecha_presentacion=date.today(),
-            monto_bruto=Decimal("0.00"),
-            monto_amortizacion=estimacion_in.monto_amortizacion,
-            monto_neto=Decimal("0.00")
+            monto_bruto=_redondear_2(estimacion_in.monto_bruto),
+            monto_amortizacion=_redondear_2(estimacion_in.monto_amortizacion),
+            monto_neto=monto_neto_calc
         )
         session.add(nueva)
         session.commit()
@@ -231,6 +205,36 @@ class EstimacionService:
         return EstimacionService._enriquecer_estimacion(session, nueva)
 
     @staticmethod
+    def corregir_borrador_o_rechazada(
+        session: Session, id_estimacion: int, est_in: models.EstimacionUpdate
+    ) -> models.EstimacionPublic:
+        """RF-SUPT-07: Permite al Superintendente ajustar montos en BORRADOR o tras un RECHAZO."""
+        est = EstimacionService.obtener_por_id(session, id_estimacion)
+        cat_est = session.get(CatEstatus, est.id_estatus)
+        if not cat_est or cat_est.clave not in {"BORRADOR", "RECHAZADA", "OBSERVADA"}:
+            raise HTTPException(
+                status_code=400,
+                detail="RNF-SEG-02: Solo se pueden corregir estimaciones en estado BORRADOR o RECHAZADA."
+            )
+
+        if est_in.monto_bruto is not None:
+            est.monto_bruto = _redondear_2(est_in.monto_bruto)
+        if est_in.monto_amortizacion is not None:
+            est.monto_amortizacion = _redondear_2(est_in.monto_amortizacion)
+
+        if est.monto_amortizacion > est.monto_bruto:
+            raise HTTPException(
+                status_code=400,
+                detail="El monto de amortización no puede exceder el monto bruto."
+            )
+
+        est.monto_neto = max(Decimal("0.00"), _redondear_2(est.monto_bruto - est.monto_amortizacion))
+        session.add(est)
+        session.commit()
+        session.refresh(est)
+        return EstimacionService._enriquecer_estimacion(session, est)
+
+    @staticmethod
     def obtener_por_id(session: Session, id_estimacion: int) -> Estimaciones:
         est = session.get(Estimaciones, id_estimacion)
         if not est:
@@ -241,7 +245,6 @@ class EstimacionService:
     def obtener_detalle_public(session: Session, id_estimacion: int) -> models.EstimacionPublicDetalle:
         est = EstimacionService.obtener_por_id(session, id_estimacion)
         base = EstimacionService._enriquecer_estimacion(session, est)
-        generadores = GeneradorService.consultar_por_estimacion(session, id_estimacion)
         revisiones = RevisionEstimacionService.consultar_por_estimacion(session, id_estimacion)
         factura = session.exec(
             select(FacturacionEstimacion).where(FacturacionEstimacion.id_estimacion == id_estimacion)
@@ -250,7 +253,6 @@ class EstimacionService:
 
         return models.EstimacionPublicDetalle(
             **base.model_dump(),
-            generadores=generadores,
             revisiones=revisiones,
             facturacion=models.FacturacionEstimacionPublic(**factura.model_dump()) if factura else None,
             pago=models.EstimacionPagadaPublic(**pago.model_dump()) if pago else None
@@ -285,59 +287,88 @@ class EstimacionService:
         session: Session, id_estimacion: int, superintendente: Usuarios, ip_origen: str
     ) -> models.EstimacionPublic:
         """
-        RN-SUPT-04.1, RN-SUPT-07.2 y RN-SUP-06.1: Valida que existan generadores y que TODOS
-        tengan croquis_url y al menos 1 fotografía en Evidencia_adjunta. Si proviene de RECHAZADA,
-        incrementa version_subsanacion y crea un nuevo registro en Revision_Estimaciones con
-        fecha_recepcion = hoy para iniciar el reloj normativo de 15 días.
+        RN-SUPT-03.8, RN-SUPT-03.9, RN-SUPT-07.2 y RN-SUP-06.1:
+        - Verifica que exista al menos un Reporte de Supervisión FIRMADO dentro del periodo de la estimación.
+        - Verifica que el acumulado bruto no rebase el importe equivalente al avance físico real firmado.
+        - Si proviene de RECHAZADA, incrementa version_subsanacion y crea un nuevo registro en Revision_Estimaciones.
         """
         est = EstimacionService.obtener_por_id(session, id_estimacion)
+        obra = session.get(Obras, est.id_obra)
+        if not obra:
+            raise HTTPException(status_code=404, detail="Obra no encontrada.")
+
+        est_obra = session.get(CatEstatus, obra.id_estatus)
+        if est_obra and est_obra.clave != "EN_EJECUCION":
+            raise HTTPException(
+                status_code=400,
+                detail=f"La obra se encuentra en estado '{est_obra.clave}'; no se pueden enviar estimaciones a revisión."
+            )
+
         cat_est = session.get(CatEstatus, est.id_estatus)
         clave_actual = cat_est.clave if cat_est else ""
-
         if clave_actual not in {"BORRADOR", "RECHAZADA", "OBSERVADA"}:
             raise HTTPException(
                 status_code=400,
                 detail=f"La estimación en estado '{clave_actual}' no puede enviarse a revisión."
             )
 
-        generadores = list(
-            session.exec(
-                select(Generadores).where(Generadores.id_estimacion == id_estimacion)
-            ).all()
-        )
-        if not generadores:
+        # RN-SUPT-03.8: Debe existir al menos un Reporte de Supervisión FIRMADO dentro del periodo
+        reporte_respaldo = session.exec(
+            select(ReporteDiarioSupervision).where(
+                ReporteDiarioSupervision.id_obra == est.id_obra,
+                ReporteDiarioSupervision.estatus_reporte == "FIRMADO",
+                col(ReporteDiarioSupervision.firmado).is_(True),
+                col(ReporteDiarioSupervision.fecha_reporte) >= est.periodo_inicio,
+                col(ReporteDiarioSupervision.fecha_reporte) <= est.periodo_fin,
+            )
+        ).first()
+        if not reporte_respaldo:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="RN-SUPT-04.1: Una estimación no puede pasar a EN_REVISION sin al menos un registro en Generadores."
+                detail=(
+                    f"RN-SUPT-03.8: Para enviar a revisión debe existir al menos un Reporte de Supervisión "
+                    f"FIRMADO dentro del periodo ({est.periodo_inicio} a {est.periodo_fin})."
+                )
             )
 
-        for gen in generadores:
-            if not gen.croquis_url or not gen.croquis_url.strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"RN-SUPT-04.1: El generador ID {gen.id_generador} carece de archivo de croquis (croquis_url vacío)."
-                )
-            num_fotos = session.exec(
-                select(func.count(col(EvidenciaAdjunta.id_evidencia))).where(
-                    EvidenciaAdjunta.id_generador == gen.id_generador
-                )
-            ).one()
-            if num_fotos < 1:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"RN-SUPT-04.1: El generador ID {gen.id_generador} requiere al menos 1 fotografía en Evidencia_adjunta."
-                )
+        # RN-SUPT-03.9: El importe bruto acumulado no puede rebasar el equivalente al avance físico vigente
+        pct_fisico_vigente = DirectivoFiniquitoService.obtener_ultimo_avance_fisico(session, obra.id_obra)
+        importe_fisico_equivalente = _redondear_2(
+            (pct_fisico_vigente / Decimal("100.00")) * obra.presupuesto_total
+        )
 
-        # Si viene de rechazo, incrementar versión de subsanación (RN-SUPT-07.1 y RN-SUPT-07.2)
+        otras_estimaciones = list(
+            session.exec(
+                select(Estimaciones).where(
+                    Estimaciones.id_obra == obra.id_obra,
+                    col(Estimaciones.id_estimacion) != est.id_estimacion
+                )
+            ).all()
+        )
+        # Sumar estimaciones activas (no rechazadas)
+        id_rech = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "RECHAZADA")
+        bruto_previo = sum(
+            (e.monto_bruto for e in otras_estimaciones if e.id_estatus != id_rech),
+            Decimal("0.00")
+        )
+        if (bruto_previo + est.monto_bruto) > importe_fisico_equivalente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"RN-SUPT-03.9: El importe bruto acumulado (${bruto_previo + est.monto_bruto:,.2f}) "
+                    f"excede el monto equivalente al avance físico real firmado ({pct_fisico_vigente}% = ${importe_fisico_equivalente:,.2f})."
+                )
+            )
+
         if clave_actual in {"RECHAZADA", "OBSERVADA"}:
             est.version_subsanacion += 1
 
-        EstimacionService.recalcular_montos(session, est)
+        est.monto_neto = max(Decimal("0.00"), _redondear_2(est.monto_bruto - est.monto_amortizacion))
         est.id_estatus = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "EN_REVISION")
         est.fecha_presentacion = date.today()
         session.add(est)
 
-        # RN-SUP-06.1: Estampar automáticamente fecha_recepcion en Revision_Estimaciones
+        # RN-SUP-06.1: Estampar fecha_recepcion en Revision_Estimaciones
         hoy = date.today()
         asig_sup = session.exec(
             select(ObrasAsignaciones)
@@ -390,310 +421,26 @@ class EstimacionService:
 
 
 # ==========================================
-# 2. SERVICIO: NÚMEROS GENERADORES Y VALIDACIÓN TÉCNICA (RF-SUPT-04, RF-SUP-01)
+# 2. SERVICIO: REVISIÓN TÉCNICA, CANDADO FINANCIERO Y AUTORIZACIÓN DE PAGO (RF-SUP-02, RF-SUP-06, RF-RES-03)
 # ==========================================
-class GeneradorService:
+class RevisionEstimacionService:
     @staticmethod
-    def _tiene_ensayo_rechazado(session: Session, id_concepto: int) -> bool:
-        """RN-SUP-03.3: Verifica si el concepto tiene algún ensayo de laboratorio con dictamen RECHAZADO."""
+    def _obra_tiene_ensayo_rechazado(session: Session, id_obra: int) -> bool:
         est_rech = session.exec(
             select(CatEstatus).where(CatEstatus.ambito == "CALIDAD", CatEstatus.clave == "RECHAZADO")
         ).first()
         if not est_rech:
             return False
         prueba = session.exec(
-            select(ControlCalidadPruebas).where(
-                ControlCalidadPruebas.id_concepto == id_concepto,
+            select(ControlCalidadPruebas)
+            .join(ConceptosCatalogo)
+            .where(
+                ConceptosCatalogo.id_obra == id_obra,
                 ControlCalidadPruebas.id_estatus_dictamen == est_rech.id_estatus
             )
         ).first()
         return prueba is not None
 
-    @staticmethod
-    def _validar_tipo_y_tope_volumen(
-        session: Session,
-        estimacion: Estimaciones,
-        concepto: ConceptosCatalogo,
-        cant_nueva: Decimal,
-        id_generador_excluir: int = 0
-    ) -> None:
-        """
-        RN-SUPT-03.1, RN-SUPT-03.2, RN-SUPT-03.3 y RN-SUPT-03.6:
-        Verifica que el concepto corresponda al tipo de estimación y no rebase el volumen autorizado.
-        """
-        if concepto.id_obra != estimacion.id_obra:
-            raise HTTPException(status_code=400, detail="El concepto no pertenece a la obra de la estimación.")
-
-        tipo_est = session.get(CatTipoEstimacion, estimacion.id_tipo_estimacion)
-        tipo_conc = session.get(CatTipoConcepto, concepto.id_tipo_concepto)
-        clave_est = tipo_est.clave if tipo_est else "ORDINARIA"
-        clave_conc = tipo_conc.clave if tipo_conc else "ORDINARIO"
-
-        generadores_hist = list(
-            session.exec(
-                select(Generadores).where(
-                    Generadores.id_concepto == concepto.id_concepto,
-                    col(Generadores.id_generador) != id_generador_excluir
-                )
-            ).all()
-        )
-        volumen_previo = sum((g.cant_ejecutada for g in generadores_hist), Decimal("0.00"))
-        volumen_total = volumen_previo + cant_nueva
-
-        if clave_est == "ORDINARIA":
-            if clave_conc != "ORDINARIO":
-                raise HTTPException(
-                    status_code=400,
-                    detail="RN-SUPT-03.1: Una estimación ORDINARIA solo puede cobrar conceptos de tipo ORDINARIO."
-                )
-            if volumen_total > concepto.cantidad_presupuestada:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"RN-SUPT-03.6: El volumen acumulado ({volumen_total}) supera la cantidad presupuestada "
-                        f"original ({concepto.cantidad_presupuestada}). Debe tramitarse como CANTIDADES_ADICIONALES."
-                    )
-                )
-        elif clave_est == "CANTIDADES_ADICIONALES":
-            if clave_conc != "ORDINARIO":
-                raise HTTPException(
-                    status_code=400,
-                    detail="RN-SUPT-03.2: Las Cantidades Adicionales solo aplican sobre conceptos del catálogo original."
-                )
-            if concepto.cantidad_adicional_autorizada <= Decimal("0.00"):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "RN-SUPT-03.2: El Residente no ha autorizado volumen adicional "
-                        "(cantidad_adicional_autorizada = 0) en bitácora para este concepto."
-                    )
-                )
-            tope_adicional = concepto.cantidad_presupuestada + concepto.cantidad_adicional_autorizada
-            if volumen_total > tope_adicional:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"RN-SUPT-03.2: El volumen acumulado ({volumen_total}) excede la suma del presupuesto original "
-                        f"más la cantidad adicional autorizada ({tope_adicional})."
-                    )
-                )
-        elif clave_est == "EXTRAORDINARIA":
-            if clave_conc != "EXTRAORDINARIO" or not concepto.autorizado_por_residente:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "RN-SUPT-03.3: Una estimación EXTRAORDINARIA solo puede cobrar conceptos de tipo "
-                        "EXTRAORDINARIO previamente autorizados con APU por el Residente."
-                    )
-                )
-            if volumen_total > concepto.cantidad_presupuestada:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"El volumen extraordinario ({volumen_total}) excede el autorizado en el APU ({concepto.cantidad_presupuestada})."
-                )
-
-    @staticmethod
-    def crear(session: Session, gen_in: models.GeneradorCreate) -> models.GeneradorPublic:
-        estimacion = EstimacionService.obtener_por_id(session, gen_in.id_estimacion)
-        obra = session.get(Obras, estimacion.id_obra)
-        est_obra = session.get(CatEstatus, obra.id_estatus) if obra else None
-        if est_obra and est_obra.clave == "SUSPENDIDA":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="RN-RES-02.2: La obra se encuentra SUSPENDIDA; está bloqueado el registro de generadores."
-            )
-
-        cat_est = session.get(CatEstatus, estimacion.id_estatus)
-        if not cat_est or cat_est.clave not in {"BORRADOR", "RECHAZADA", "OBSERVADA"}:
-            raise HTTPException(
-                status_code=400,
-                detail="RNF-SEG-02: No se pueden agregar generadores a una estimación en revisión o autorizada."
-            )
-
-        if gen_in.croquis_url:
-            validar_formato_y_tamano_archivo(gen_in.croquis_url, (".pdf", ".jpg", ".jpeg", ".png"))
-
-        concepto = session.get(ConceptosCatalogo, gen_in.id_concepto)
-        if not concepto:
-            raise HTTPException(status_code=404, detail="Concepto de catálogo no encontrado.")
-
-        GeneradorService._validar_tipo_y_tope_volumen(
-            session, estimacion, concepto, gen_in.cant_ejecutada
-        )
-
-        duplicado_tramo = session.exec(
-            select(Generadores).where(
-                Generadores.id_estimacion == gen_in.id_estimacion,
-                Generadores.id_concepto == gen_in.id_concepto,
-                Generadores.ubicacion_tramo == gen_in.ubicacion_tramo
-            )
-        ).first()
-        if duplicado_tramo:
-            raise HTTPException(
-                status_code=400,
-                detail="Ya existe un generador para este concepto y tramo en la misma estimación."
-            )
-
-        nuevo = Generadores(
-            id_estimacion=gen_in.id_estimacion,
-            id_concepto=gen_in.id_concepto,
-            ubicacion_tramo=gen_in.ubicacion_tramo,
-            cant_ejecutada=gen_in.cant_ejecutada,
-            croquis_url=gen_in.croquis_url,
-            observaciones=gen_in.observaciones
-        )
-        session.add(nuevo)
-        session.commit()
-        session.refresh(nuevo)
-
-        EstimacionService.recalcular_montos(session, estimacion)
-        return models.GeneradorPublic(
-            **nuevo.model_dump(),
-            tiene_ensayo_rechazado=GeneradorService._tiene_ensayo_rechazado(session, nuevo.id_concepto)
-        )
-
-    @staticmethod
-    def consultar_por_estimacion(session: Session, id_estimacion: int) -> List[models.GeneradorPublic]:
-        lista = list(
-            session.exec(
-                select(Generadores).where(Generadores.id_estimacion == id_estimacion)
-            ).all()
-        )
-        return [
-            models.GeneradorPublic(
-                **g.model_dump(),
-                tiene_ensayo_rechazado=GeneradorService._tiene_ensayo_rechazado(session, g.id_concepto)
-            )
-            for g in lista
-        ]
-
-    @staticmethod
-    def corregir_generador(
-        session: Session, id_generador: int, gen_in: models.GeneradorUpdate
-    ) -> models.GeneradorPublic:
-        gen = session.get(Generadores, id_generador)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generador no encontrado.")
-
-        estimacion = EstimacionService.obtener_por_id(session, gen.id_estimacion)
-        cat_est = session.get(CatEstatus, estimacion.id_estatus)
-        if not cat_est or cat_est.clave not in {"BORRADOR", "RECHAZADA", "OBSERVADA"}:
-            raise HTTPException(
-                status_code=400,
-                detail="RN-SUPT-07.1 / RNF-SEG-02: Solo se pueden editar generadores cuando la estimación está en BORRADOR o RECHAZADA."
-            )
-
-        if gen_in.croquis_url:
-            validar_formato_y_tamano_archivo(gen_in.croquis_url, (".pdf", ".jpg", ".jpeg", ".png"))
-
-        concepto = session.get(ConceptosCatalogo, gen.id_concepto)
-        if not concepto:
-            raise HTTPException(status_code=404, detail="Concepto no encontrado.")
-        nueva_cant = gen_in.cant_ejecutada if gen_in.cant_ejecutada is not None else gen.cant_ejecutada
-        GeneradorService._validar_tipo_y_tope_volumen(
-            session, estimacion, concepto, nueva_cant, id_generador_excluir=gen.id_generador
-        )
-
-        datos = gen_in.model_dump(exclude_unset=True)
-        for campo, valor in datos.items():
-            setattr(gen, campo, valor)
-
-        session.add(gen)
-        session.commit()
-        session.refresh(gen)
-
-        EstimacionService.recalcular_montos(session, estimacion)
-        return models.GeneradorPublic(
-            **gen.model_dump(),
-            tiene_ensayo_rechazado=GeneradorService._tiene_ensayo_rechazado(session, gen.id_concepto)
-        )
-
-    @staticmethod
-    def validar_generador(
-        session: Session, val_in: models.GeneradorValidacionCreate
-    ) -> models.GeneradorValidacionPublic:
-        """
-        RF-SUP-01 (RN-SUP-01.1 a RN-SUP-01.3) y RN-SUP-03.3:
-        - Precondición: La estimación debe estar EN_REVISION.
-        - 0 <= cant_aprobada <= cant_ejecutada.
-        - Si cant_aprobada < cant_ejecutada, observaciones_auditoria es obligatorio.
-        - Guarda la versión revisada sin sobrescribir versiones previas.
-        """
-        gen = session.get(Generadores, val_in.id_generador)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generador no encontrado.")
-
-        estimacion = EstimacionService.obtener_por_id(session, gen.id_estimacion)
-        cat_est = session.get(CatEstatus, estimacion.id_estatus)
-        if not cat_est or cat_est.clave != "EN_REVISION":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="RF-SUP-01: La estimación debe encontrarse en estado EN_REVISION para validar sus generadores."
-            )
-
-        # RN-SUP-01.1: Tope de cantidad aprobada
-        if val_in.cant_aprobada > gen.cant_ejecutada:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"RN-SUP-01.1: El Supervisor no puede aprobar un volumen ({val_in.cant_aprobada}) "
-                    f"mayor al declarado como ejecutado por el contratista ({gen.cant_ejecutada})."
-                )
-            )
-
-        # RN-SUP-01.2: Justificación obligatoria de recorte o rechazo
-        if val_in.cant_aprobada < gen.cant_ejecutada:
-            if not val_in.observaciones_auditoria or not val_in.observaciones_auditoria.strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "RN-SUP-01.2: Cuando la cantidad aprobada es menor a la ejecutada, "
-                        "el campo 'observaciones_auditoria' es obligatorio."
-                    )
-                )
-
-        # RN-SUP-01.3: Trazabilidad por versión (version_subsanacion actual)
-        existente_version = session.exec(
-            select(GeneradoresValidacion).where(
-                GeneradoresValidacion.id_generador == gen.id_generador,
-                GeneradoresValidacion.version_revisada == estimacion.version_subsanacion
-            )
-        ).first()
-        if existente_version:
-            existente_version.cant_aprobada = val_in.cant_aprobada
-            existente_version.observaciones_auditoria = val_in.observaciones_auditoria
-            session.add(existente_version)
-            session.commit()
-            session.refresh(existente_version)
-            registro = existente_version
-        else:
-            registro = GeneradoresValidacion(
-                id_generador=gen.id_generador,
-                version_revisada=estimacion.version_subsanacion,
-                cant_aprobada=val_in.cant_aprobada,
-                observaciones_auditoria=val_in.observaciones_auditoria
-            )
-            session.add(registro)
-            session.commit()
-            session.refresh(registro)
-
-        advertencia = None
-        if GeneradorService._tiene_ensayo_rechazado(session, gen.id_concepto):
-            advertencia = (
-                "ADVERTENCIA (RN-SUP-03.3): Este concepto cuenta con al menos una prueba de laboratorio "
-                "dictaminada como RECHAZADO en Control_Calidad_Pruebas."
-            )
-
-        return models.GeneradorValidacionPublic(
-            **registro.model_dump(),
-            advertencia_calidad=advertencia
-        )
-
-
-# ==========================================
-# 3. SERVICIO: REVISIÓN TÉCNICA, CANDADO FINANCIERO Y AUTORIZACIÓN DE PAGO (RF-SUP-02, RF-SUP-06, RF-RES-03)
-# ==========================================
-class RevisionEstimacionService:
     @staticmethod
     def dictaminar_estimacion(
         session: Session,
@@ -703,10 +450,10 @@ class RevisionEstimacionService:
         ip_origen: str
     ) -> models.RevisionEstimacionPublic:
         """
-        RF-SUP-02 (RN-SUP-02.1 a RN-SUP-02.4), RF-SUP-05 y RN-DIR-01.6:
+        RF-SUP-02 (Sin Generadores ni Retenciones RF-SUP-05):
         - Exige firma electrónica del Supervisor.
-        - Verifica que el 100% de los generadores tengan validación en la versión actual.
-        - Si APROBADA: recalcula monto_autorizado_neto, verifica candado Físico >= Financiero y actualiza Avances_Fisicos.
+        - Si APROBADA: verifica candado Avance Financiero Real <= Avance Físico Real (Avances_Fisicos)
+          y registra un nuevo corte actualizado en Avances_Fisicos.
         - Si RECHAZADA: exige observaciones_rechazo y desbloquea la estimación para subsanación (RF-SUPT-07).
         """
         estimacion = EstimacionService.obtener_por_id(session, id_estimacion)
@@ -717,42 +464,12 @@ class RevisionEstimacionService:
                 detail="La estimación debe estar en estado EN_REVISION para emitir dictamen."
             )
 
-        # RN-SUP-02.4: Firma electrónica obligatoria del Supervisor
         sello = validar_firma_electronica_y_generar_sello(
             firma_plana=dictamen_in.firma_electronica_supervisor,
             firma_hash_usuario=supervisor.firma_electronica,
             id_usuario=supervisor.id_usuario,
             referencia=f"REVISION-EST:{id_estimacion}-V{estimacion.version_subsanacion}"
         )
-
-        # Precondición RF-SUP-02: El 100% de los generadores deben tener dictamen en la versión actual
-        generadores = list(
-            session.exec(
-                select(Generadores).where(Generadores.id_estimacion == id_estimacion)
-            ).all()
-        )
-        if not generadores:
-            raise HTTPException(status_code=400, detail="La estimación no tiene generadores registrados.")
-
-        importe_aprobado_bruto = Decimal("0.00")
-        for gen in generadores:
-            val = session.exec(
-                select(GeneradoresValidacion).where(
-                    GeneradoresValidacion.id_generador == gen.id_generador,
-                    GeneradoresValidacion.version_revisada == estimacion.version_subsanacion
-                )
-            ).first()
-            if not val:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"RF-SUP-02: Precondición incumplida. El generador ID {gen.id_generador} aún no cuenta "
-                        f"con dictamen en Generadores_Validacion para la versión {estimacion.version_subsanacion}."
-                    )
-                )
-            conc = session.get(ConceptosCatalogo, gen.id_concepto)
-            if conc:
-                importe_aprobado_bruto += _redondear_2(val.cant_aprobada * conc.precio_unitario)
 
         revision = session.exec(
             select(RevisionEstimaciones).where(
@@ -771,7 +488,6 @@ class RevisionEstimacionService:
             )
 
         if dictamen_in.estatus_dictamen == "RECHAZADA":
-            # RN-SUP-02.3: Flujo de rechazo y subsanación
             if not dictamen_in.observaciones_rechazo or not dictamen_in.observaciones_rechazo.strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -804,17 +520,24 @@ class RevisionEstimacionService:
                 clave_estatus_revision="RECHAZADA"
             )
 
-        # Caso APROBADA (RN-SUP-02.1, RN-SUP-02.2, RF-SUP-05)
-        monto_aut_neto = max(
-            Decimal("0.00"),
-            _redondear_2(importe_aprobado_bruto - estimacion.monto_amortizacion - dictamen_in.retencion_economica_atraso)
+        # Caso APROBADA
+        monto_aut_neto = (
+            _redondear_2(dictamen_in.monto_autorizado_neto)
+            if dictamen_in.monto_autorizado_neto is not None
+            else estimacion.monto_neto
         )
+        if monto_aut_neto > estimacion.monto_neto:
+            raise HTTPException(
+                status_code=400,
+                detail="El monto autorizado neto no puede ser mayor al monto neto solicitado en la estimación."
+            )
 
-        # RN-DIR-01.6 y RN-SUP-02.2: Candado Avance Financiero Real <= Avance Físico Real
         obra = session.get(Obras, estimacion.id_obra)
         if not obra:
             raise HTTPException(status_code=404, detail="Obra no encontrada.")
-        metricas_previas = DirectivoFiniquitoService.calcular_avances_obra(session, obra)
+
+        # RN-DIR-01.6 y RN-SUP-02.2: Candado Avance Financiero Real <= Avance Físico Real
+        pct_fisico_real = DirectivoFiniquitoService.obtener_ultimo_avance_fisico(session, obra.id_obra)
         id_rev_aprob = EstimacionService._obtener_estatus_id(session, "REVISION", "APROBADA")
         revs_aprob_previas = list(
             session.exec(
@@ -830,7 +553,7 @@ class RevisionEstimacionService:
         acumulado_financiero = sum((r.monto_autorizado_neto for r in revs_aprob_previas), Decimal("0.00")) + monto_aut_neto
         nuevo_pct_fin = _redondear_2((acumulado_financiero / obra.presupuesto_total) * Decimal("100.00"))
 
-        if nuevo_pct_fin > metricas_previas["pct_fisico_real"]:
+        if nuevo_pct_fin > pct_fisico_real:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Violación de control presupuestal: El avance financiero no puede superar al avance físico real ejecutado"
@@ -850,8 +573,13 @@ class RevisionEstimacionService:
         session.commit()
         session.refresh(revision)
 
-        # RN-SUP-02.4: Al aprobarse, se actualiza un nuevo corte en la tabla Avances_Fisicos
-        DirectivoFiniquitoService.registrar_corte_avance(session, obra.id_obra, date.today())
+        # Actualizar corte en Avances_Fisicos manteniendo el porcentaje_fisico vigente
+        DirectivoFiniquitoService.registrar_corte_avance(
+            session=session,
+            id_obra=obra.id_obra,
+            porcentaje_fisico_nuevo=pct_fisico_real,
+            fecha_corte=date.today()
+        )
 
         AuditoriaService.registrar_evento(
             session=session,
@@ -863,9 +591,16 @@ class RevisionEstimacionService:
             ip_origen=ip_origen
         )
 
+        advertencia = None
+        if RevisionEstimacionService._obra_tiene_ensayo_rechazado(session, obra.id_obra):
+            advertencia = (
+                "ADVERTENCIA (RN-SUP-03.3): La obra cuenta con pruebas de laboratorio dictaminadas como RECHAZADO."
+            )
+
         return models.RevisionEstimacionPublic(
             **revision.model_dump(),
-            clave_estatus_revision="APROBADA"
+            clave_estatus_revision="APROBADA",
+            advertencia_calidad=advertencia
         )
 
     @staticmethod
@@ -892,10 +627,6 @@ class RevisionEstimacionService:
     def consultar_alertas_plazo_15_dias(
         session: Session, id_obra: int
     ) -> List[models.AlertaPlazoRevisionPublic]:
-        """
-        RF-SUP-06 (RN-SUP-06.1 y RN-SUP-06.2): Evalúa el reloj normativo de 15 días naturales
-        para todas las revisiones en estado PENDIENTE.
-        """
         hoy = date.today()
         id_pend = EstimacionService._obtener_estatus_id(session, "REVISION", "PENDIENTE")
         pendientes = list(
@@ -949,10 +680,6 @@ class RevisionEstimacionService:
         residente: Usuarios,
         ip_origen: str
     ) -> models.EstimacionPublic:
-        """
-        RF-RES-03 (RN-RES-03.1 y RN-RES-03.2): Autorización de pago por el Residente con firma electrónica,
-        doble verificación presupuestal y candado Avance Físico >= Avance Financiero.
-        """
         estimacion = EstimacionService.obtener_por_id(session, id_estimacion)
         cat_est = session.get(CatEstatus, estimacion.id_estatus)
         if not cat_est or cat_est.clave != "APROBADA":
@@ -968,7 +695,6 @@ class RevisionEstimacionService:
             referencia=f"AUTORIZACION-PAGO-EST:{id_estimacion}"
         )
 
-        # RN-RES-03.1: Doble verificación presupuestal y candado Físico >= Financiero
         obra = session.get(Obras, estimacion.id_obra)
         if not obra:
             raise HTTPException(status_code=404, detail="Obra no encontrada.")
@@ -1000,7 +726,6 @@ class RevisionEstimacionService:
                 detail="Violación de control presupuestal: El avance financiero no puede superar al avance físico real ejecutado"
             )
 
-        # RN-RES-03.2: Transición a AUTORIZADA_PAGO
         estimacion.id_estatus = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "AUTORIZADA_PAGO")
         session.add(estimacion)
         session.commit()
@@ -1019,19 +744,13 @@ class RevisionEstimacionService:
 
 
 # ==========================================
-# 4. SERVICIO: FACTURACIÓN CFDI Y LIQUIDACIÓN (RF-SUPT-06 y Estimaciones_Pagadas)
+# 3. SERVICIO: FACTURACIÓN CFDI Y LIQUIDACIÓN (RF-SUPT-06 y Estimaciones_Pagadas)
 # ==========================================
 class FacturacionPagoService:
     @staticmethod
     def adjuntar_cfdi(
         session: Session, factura_in: models.FacturacionEstimacionCreate
     ) -> FacturacionEstimacion:
-        """
-        RF-SUPT-06 (RN-SUPT-06.1 y RN-SUPT-06.2):
-        - Precondición estricta: La estimación debe estar en estado AUTORIZADA_PAGO.
-        - Par fiscal obligatorio: .pdf y .xml + folio_fiscal irrepetible.
-        - Cuadre financiero: monto_factura == monto_autorizado_neto en Revision_Estimaciones.
-        """
         estimacion = EstimacionService.obtener_por_id(session, factura_in.id_estimacion)
         cat_est = session.get(CatEstatus, estimacion.id_estatus)
         if not cat_est or cat_est.clave != "AUTORIZADA_PAGO":
@@ -1040,7 +759,6 @@ class FacturacionPagoService:
                 detail="RF-SUPT-06: Solo se pueden adjuntar archivos fiscales (CFDI) cuando la estimación tiene estatus AUTORIZADA_PAGO."
             )
 
-        # RN-SUPT-06.1: Validar formatos .pdf y .xml
         validar_formato_y_tamano_archivo(factura_in.ruta_pdf, (".pdf",))
         validar_formato_y_tamano_archivo(factura_in.ruta_xml, (".xml",))
 
@@ -1056,7 +774,6 @@ class FacturacionPagoService:
         if existente_uuid:
             raise HTTPException(status_code=400, detail="RN-SUPT-06.1: El folio fiscal (UUID) ya está registrado.")
 
-        # RN-SUPT-06.2: Cuadre financiero exacto contra monto_autorizado_neto
         rev_aprobada = session.exec(
             select(RevisionEstimaciones)
             .where(
@@ -1091,7 +808,6 @@ class FacturacionPagoService:
     def registrar_liquidacion_pago(
         session: Session, pago_in: models.EstimacionPagadaCreate, usuario: Usuarios, ip_origen: str
     ) -> EstimacionesPagadas:
-        """Registra la liquidación efectiva en Estimaciones_Pagadas y pasa la estimación a LIQUIDADA."""
         estimacion = EstimacionService.obtener_por_id(session, pago_in.id_estimacion)
         factura = session.exec(
             select(FacturacionEstimacion).where(FacturacionEstimacion.id_estimacion == pago_in.id_estimacion)
@@ -1125,8 +841,13 @@ class FacturacionPagoService:
         session.commit()
         session.refresh(nuevo_pago)
 
-        # Actualizar corte de avance financiero y físico
-        DirectivoFiniquitoService.registrar_corte_avance(session, estimacion.id_obra, pago_in.fecha_pago)
+        # Actualizar corte de avance financiero manteniendo el avance físico vigente
+        DirectivoFiniquitoService.registrar_corte_avance(
+            session=session,
+            id_obra=estimacion.id_obra,
+            porcentaje_fisico_nuevo=None,
+            fecha_corte=pago_in.fecha_pago
+        )
 
         AuditoriaService.registrar_evento(
             session=session,

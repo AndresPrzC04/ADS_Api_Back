@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import EmailStr
 from sqlmodel import Field, SQLModel
 
@@ -50,7 +50,24 @@ class TokenResponse(SQLModel):
 
 
 # ==========================================
-# 2. ESQUEMAS DE ASIGNACIÓN Y RELEVO EN OBRAS (RF-ADM-03)
+# 2. DICCIONARIO DE CORREOS Y DOMINIOS AUTORIZADOS (RN-ADM-01.8 a RN-ADM-01.11)
+# ==========================================
+class CorreoAutorizadoCreate(SQLModel):
+    id_contratista: Optional[int] = None  # None = Institucional interno; ID = Empresa contratista
+    tipo_registro: Literal["DOMINIO", "CORREO"]
+    valor: str = Field(max_length=150)
+
+
+class CorreoAutorizadoPublic(SQLModel):
+    id_correo_autorizado: int
+    id_contratista: Optional[int] = None
+    tipo_registro: str
+    valor: str
+    activo: bool
+
+
+# ==========================================
+# 3. ESQUEMAS DE ASIGNACIÓN Y RELEVO EN OBRAS (RF-ADM-03)
 # ==========================================
 class ObraAsignacionCreate(SQLModel):
     id_obra: int
@@ -75,7 +92,7 @@ class ObraAsignacionPublic(SQLModel):
 
 
 # ==========================================
-# 3. ESQUEMAS DE CATÁLOGOS MAESTROS (RF-ADM-05)
+# 4. ESQUEMAS DE CATÁLOGOS MAESTROS (RF-ADM-05)
 # ==========================================
 class UnidadMedidaCreate(SQLModel):
     clave: str = Field(max_length=20)
@@ -154,7 +171,7 @@ class TipoEnsayoPublic(TipoEnsayoCreate):
 
 
 # ==========================================
-# 4. ESQUEMAS DE AUDITORÍA (RNF-SEG-03)
+# 5. ESQUEMAS DE AUDITORÍA (RNF-SEG-03)
 # ==========================================
 class AuditoriaLogPublic(SQLModel):
     id_log: int
