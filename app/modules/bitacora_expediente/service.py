@@ -380,7 +380,8 @@ class EvidenciaService:
             reporte = session.get(ReporteDiarioSupervision, ev_in.id_reporte)
             if not reporte:
                 raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
-            if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+            est_rep = session.get(CatEstatus, reporte.id_estatus_reporte)
+            if est_rep and est_rep.clave == "FIRMADO":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="RN-SUP-03.4 / RNF-SEG-02: No se pueden agregar evidencias a un reporte de supervisión ya firmado."
@@ -414,7 +415,8 @@ class EvidenciaService:
                     )
         elif ev.id_reporte is not None:
             reporte = session.get(ReporteDiarioSupervision, ev.id_reporte)
-            if reporte and (reporte.firmado or reporte.estatus_reporte == "FIRMADO"):
+            est_rep = session.get(CatEstatus, reporte.id_estatus_reporte) if reporte else None
+            if est_rep and est_rep.clave == "FIRMADO":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="RN-SUP-03.4 / RNF-SEG-02: Prohibido eliminar evidencias de un reporte de supervisión ya firmado."
@@ -430,18 +432,46 @@ class EvidenciaService:
 # ==========================================
 class SupervisionCalidadService:
     @staticmethod
+    def _obtener_estatus_reporte_id(session: Session, clave: str) -> int:
+        est = session.exec(
+            select(CatEstatus).where(CatEstatus.ambito == "REPORTE", CatEstatus.clave == clave)
+        ).first()
+        if not est:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Estatus de reporte (REPORTE: {clave}) no encontrado en Cat_Estatus."
+            )
+        return est.id_estatus
+
+    @staticmethod
     def _enriquecer_reporte(
         session: Session,
         reporte: ReporteDiarioSupervision,
         advertencia_calidad: str | None = None
     ) -> models.ReporteDiarioSupervisionPublic:
+        est = session.get(CatEstatus, reporte.id_estatus_reporte)
+        clave_est = est.clave if est else "BORRADOR"
         evidencias = list(
             session.exec(
                 select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_reporte == reporte.id_reporte)
             ).all()
         )
         return models.ReporteDiarioSupervisionPublic(
-            **reporte.model_dump(),
+            id_reporte=reporte.id_reporte,
+            id_obra=reporte.id_obra,
+            id_supervisor=reporte.id_supervisor,
+            fecha_reporte=reporte.fecha_reporte,
+            id_estatus_reporte=reporte.id_estatus_reporte,
+            estatus_reporte=clave_est,
+            clima=reporte.clima,
+            estado_fuerza_trabajo=reporte.estado_fuerza_trabajo,
+            maquinaria_activa=reporte.maquinaria_activa,
+            incidencias_relevantes=reporte.incidencias_relevantes,
+            porcentaje_avance_reportado=reporte.porcentaje_avance_reportado,
+            firmado=(clave_est == "FIRMADO"),
+            sello_digital=reporte.sello_digital,
+            fecha_envio=reporte.fecha_envio,
+            fecha_firma=reporte.fecha_firma,
             evidencias=[models.EvidenciaAdjuntaPublic(**e.model_dump()) for e in evidencias],
             advertencia_calidad=advertencia_calidad
         )
@@ -522,17 +552,17 @@ class SupervisionCalidadService:
                 session, obra.id_obra, reporte_in.porcentaje_avance_reportado
             )
 
+        id_est_borrador = SupervisionCalidadService._obtener_estatus_reporte_id(session, "BORRADOR")
         nuevo = ReporteDiarioSupervision(
             id_obra=reporte_in.id_obra,
             id_supervisor=supervisor.id_usuario,
+            id_estatus_reporte=id_est_borrador,
             fecha_reporte=reporte_in.fecha_reporte,
-            estatus_reporte="BORRADOR",
             clima=reporte_in.clima,
             estado_fuerza_trabajo=reporte_in.estado_fuerza_trabajo,
             maquinaria_activa=reporte_in.maquinaria_activa,
             incidencias_relevantes=reporte_in.incidencias_relevantes,
             porcentaje_avance_reportado=reporte_in.porcentaje_avance_reportado,
-            firmado=False,
             sello_digital=None
         )
         session.add(nuevo)
@@ -554,7 +584,8 @@ class SupervisionCalidadService:
         if not reporte:
             raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
 
-        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+        est_actual = session.get(CatEstatus, reporte.id_estatus_reporte)
+        if est_actual and est_actual.clave == "FIRMADO":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="RN-SUP-03.4 / RNF-SEG-02: El reporte ya fue firmado electrónicamente y es inmutable."
@@ -586,7 +617,8 @@ class SupervisionCalidadService:
         if not reporte:
             raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
 
-        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+        est_actual = session.get(CatEstatus, reporte.id_estatus_reporte)
+        if est_actual and est_actual.clave == "FIRMADO":
             raise HTTPException(
                 status_code=400,
                 detail="Este reporte ya fue firmado y cerrado."
@@ -615,7 +647,7 @@ class SupervisionCalidadService:
                 session, reporte.id_obra, reporte.porcentaje_avance_reportado
             )
 
-        reporte.estatus_reporte = "ENVIADO"
+        reporte.id_estatus_reporte = SupervisionCalidadService._obtener_estatus_reporte_id(session, "ENVIADO")
         reporte.fecha_envio = datetime.now(timezone.utc)
         session.add(reporte)
         session.commit()
@@ -640,13 +672,15 @@ class SupervisionCalidadService:
         if not reporte:
             raise HTTPException(status_code=404, detail="Reporte de supervisión no encontrado.")
 
-        if reporte.firmado or reporte.estatus_reporte == "FIRMADO":
+        est_actual = session.get(CatEstatus, reporte.id_estatus_reporte)
+        clave_actual = est_actual.clave if est_actual else ""
+        if clave_actual == "FIRMADO":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="RNF-SEG-02: Este reporte ya cuenta con firma electrónica y es inmutable."
             )
 
-        if reporte.estatus_reporte != "ENVIADO":
+        if clave_actual != "ENVIADO":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="RN-SUP-03.4: Debe completar y enviar el reporte (estado ENVIADO) antes de poder firmarlo."
@@ -669,8 +703,7 @@ class SupervisionCalidadService:
             referencia=f"REPORTE-SUP:{reporte.id_reporte}-OBRA:{reporte.id_obra}"
         )
 
-        reporte.estatus_reporte = "FIRMADO"
-        reporte.firmado = True
+        reporte.id_estatus_reporte = SupervisionCalidadService._obtener_estatus_reporte_id(session, "FIRMADO")
         reporte.sello_digital = sello
         reporte.fecha_firma = datetime.now(timezone.utc)
         session.add(reporte)

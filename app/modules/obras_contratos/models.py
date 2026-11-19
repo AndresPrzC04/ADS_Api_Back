@@ -102,11 +102,13 @@ class PolizaPublic(SQLModel):
 
 
 # =====================================================================
-# 4. CATÁLOGO DE CONCEPTOS Y PRECIOS EXTRAORDINARIOS (RF-SUPT-01, RF-RES-04)
+# 4. CATÁLOGO DE CONCEPTOS POR PARTIDA/SUBPARTIDA Y APU (RF-SUPT-01, RF-RES-04)
 # =====================================================================
 class ConceptoCatalogoCreate(SQLModel):
     id_obra: int
     id_unidad: int
+    partida: str = Field(default="GENERAL", max_length=120)
+    subpartida: str = Field(default="GENERAL", max_length=120)
     clave_concepto: str = Field(max_length=100)
     descripcion: str
     cantidad_presupuestada: Decimal = Field(ge=0)
@@ -115,6 +117,8 @@ class ConceptoCatalogoCreate(SQLModel):
 
 class ConceptoCatalogoUpdate(SQLModel):
     id_unidad: Optional[int] = None
+    partida: Optional[str] = Field(default=None, max_length=120)
+    subpartida: Optional[str] = Field(default=None, max_length=120)
     clave_concepto: Optional[str] = Field(default=None, max_length=100)
     descripcion: Optional[str] = None
     cantidad_presupuestada: Optional[Decimal] = Field(default=None, ge=0)
@@ -125,6 +129,8 @@ class ConceptoExtraordinarioInyeccion(SQLModel):
     """RF-RES-04: Inyección de concepto extraordinario con dictamen APU y firma electrónica del Residente."""
     id_obra: int
     id_unidad: int
+    partida: str = Field(default="EXTRAORDINARIOS", max_length=120)
+    subpartida: str = Field(default="EXTRAORDINARIOS", max_length=120)
     clave_concepto: str = Field(max_length=100)
     descripcion: str
     cantidad_presupuestada: Decimal = Field(gt=0)
@@ -138,6 +144,9 @@ class ConceptoCatalogoPublic(SQLModel):
     id_obra: int
     id_tipo_concepto: int
     id_unidad: int
+    id_subpartida: int
+    partida: str
+    subpartida: str
     clave_concepto: str
     descripcion: str
     cantidad_presupuestada: Decimal
@@ -147,9 +156,31 @@ class ConceptoCatalogoPublic(SQLModel):
     autorizado_por_residente: bool
 
 
+class SubtotalSubpartidaPublic(SQLModel):
+    subpartida: str
+    cantidad_conceptos: int
+    importe_subtotal: Decimal
+
+
+class SubtotalPartidaPublic(SQLModel):
+    partida: str
+    cantidad_conceptos: int
+    importe_subtotal: Decimal
+    subpartidas: List[SubtotalSubpartidaPublic] = []
+
+
+class ResumenPresupuestoObraPublic(SQLModel):
+    id_obra: int
+    nombre_obra: str
+    total_conceptos: int
+    total_presupuesto_calculado: Decimal
+    presupuesto_tope_obra: Decimal
+    saldo_disponible_catalogo: Decimal
+    partidas: List[SubtotalPartidaPublic] = []
+
+
 # =====================================================================
-# 5. TABLERO DIRECTIVO, CORTES DE AVANCE, REPORTES Y FINIQUITO (RF-DIR-01, RF-DIR-04, RF-RES-05)
-# (Sin Gantt / Programa_ejecucion derogados)
+# 5. TABLERO DIRECTIVO, CORTES DE AVANCE, REPORTES Y FINIQUITO
 # =====================================================================
 class AvanceFisicoPublic(SQLModel):
     id_avance: int

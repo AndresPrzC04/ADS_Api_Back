@@ -1,10 +1,10 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.core.database import init_db
-import app.models_base  # noqa: F401 - Registra las 29 tablas en SQLModel.metadata
+import app.models_base  # noqa: F401 - Registra las 29 tablas en 3NF estricta en SQLModel.metadata
 
 # Importación de routers por módulo
-from app.modules.usuario_accesos.router import router as usuarios_router
+from app.modules.usuarios_accesos.router import router as usuarios_router
 from app.modules.obras_contratos.router import router as obras_router
 from app.modules.estimaciones.router import router as estimaciones_router
 from app.modules.bitacora_expediente.router import router as bitacora_router
@@ -19,10 +19,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="API - Sistema Administrador de Obras Públicas (SQLModel 3NF)",
     description=(
-        "Backend unificado en 3NF con SQLModel: Gestión de Usuarios y Relevos, "
-        "Obras y Contratos, Estimaciones y Generadores, Bitácora Electrónica Inmutable y Control de Calidad."
+        "Backend unificado en 3NF con SQLModel (29 tablas en 3NF estricta): Gestión de Usuarios y Diccionario de Correos, "
+        "Obras y Contratos, Estimaciones, Bitácora Inmutable y Reportes de Supervisión con Avance Físico."
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -36,7 +36,7 @@ app.include_router(bitacora_router, prefix="/api/v1")
 def health_check():
     return {
         "estatus": "activo",
-        "orm": "SQLModel (3NF - 29 Tablas)",
+        "orm": "SQLModel (3NF - 29 Tablas - 3NF Estricta)",
         "modulos": [
             "usuarios_accesos",
             "obras_contratos",

@@ -312,12 +312,12 @@ class EstimacionService:
                 detail=f"La estimación en estado '{clave_actual}' no puede enviarse a revisión."
             )
 
-        # RN-SUPT-03.8: Debe existir al menos un Reporte de Supervisión FIRMADO dentro del periodo
+        # RN-SUPT-03.8: Debe existir al menos un Reporte de Supervisión FIRMADO dentro del periodo (3NF)
+        id_rep_firmado = EstimacionService._obtener_estatus_id(session, "REPORTE", "FIRMADO")
         reporte_respaldo = session.exec(
             select(ReporteDiarioSupervision).where(
                 ReporteDiarioSupervision.id_obra == est.id_obra,
-                ReporteDiarioSupervision.estatus_reporte == "FIRMADO",
-                col(ReporteDiarioSupervision.firmado).is_(True),
+                ReporteDiarioSupervision.id_estatus_reporte == id_rep_firmado,
                 col(ReporteDiarioSupervision.fecha_reporte) >= est.periodo_inicio,
                 col(ReporteDiarioSupervision.fecha_reporte) <= est.periodo_fin,
             )

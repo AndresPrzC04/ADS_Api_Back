@@ -10,11 +10,10 @@ def utc_now() -> datetime:
 
 
 # =============================================================================
-# BLOQUE 1: CATÁLOGOS MAESTROS INSTITUCIONALES (RF-ADM-01, RF-ADM-02 y RF-ADM-05)
-# 27 Tablas en 3NF alineadas con Obras_db.sql y ADS Requerimientos (3).docx
+# BLOQUE 1: CATÁLOGOS MAESTROS INSTITUCIONALES (29 Tablas en 3NF Estricta)
 # =============================================================================
 
-# 1. Catálogo de Roles Únicos del Sistema (RF-ADM-02, RN-ADM-02.1)
+# 1. Catálogo de Roles Únicos del Sistema
 class RolUsuario(SQLModel, table=True):
     __tablename__ = "rol_usuario"
 
@@ -26,7 +25,7 @@ class RolUsuario(SQLModel, table=True):
     usuarios: List["Usuarios"] = Relationship(back_populates="rol")
 
 
-# 2. Catálogo Maestro de Estatus por Ámbito (RF-ADM-05)
+# 2. Catálogo Maestro de Estatus por Ámbito
 class CatEstatus(SQLModel, table=True):
     __tablename__ = "cat_estatus"
     __table_args__ = (
@@ -40,7 +39,7 @@ class CatEstatus(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 3. Catálogo de Unidades de Medida (RF-ADM-05)
+# 3. Catálogo de Unidades de Medida
 class CatUnidadesMedida(SQLModel, table=True):
     __tablename__ = "cat_unidades_medida"
 
@@ -50,7 +49,33 @@ class CatUnidadesMedida(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 4. Catálogo de Tipos de Concepto de Obra (RF-SUPT-01, RF-RES-04)
+# 4. Catálogo de Partidas Presupuestales (3NF)
+class CatPartidas(SQLModel, table=True):
+    __tablename__ = "cat_partidas"
+
+    id_partida: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    nombre: str = Field(max_length=120, unique=True, index=True)
+    activo: bool = Field(default=True)
+
+    subpartidas: List["CatSubpartidas"] = Relationship(back_populates="partida")
+
+
+# 5. Catálogo de Subpartidas Presupuestales (3NF)
+class CatSubpartidas(SQLModel, table=True):
+    __tablename__ = "cat_subpartidas"
+    __table_args__ = (
+        UniqueConstraint("id_partida", "nombre", name="uq_subpartida_por_partida"),
+    )
+
+    id_subpartida: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    id_partida: int = Field(foreign_key="cat_partidas.id_partida", index=True)
+    nombre: str = Field(max_length=120, index=True)
+    activo: bool = Field(default=True)
+
+    partida: Optional[CatPartidas] = Relationship(back_populates="subpartidas")
+
+
+# 6. Catálogo de Tipos de Concepto de Obra
 class CatTipoConcepto(SQLModel, table=True):
     __tablename__ = "cat_tipo_concepto"
 
@@ -61,7 +86,7 @@ class CatTipoConcepto(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 5. Catálogo de los 3 Tipos de Estimación Autorizados (RF-SUPT-03)
+# 7. Catálogo de Tipos de Estimación
 class CatTipoEstimacion(SQLModel, table=True):
     __tablename__ = "cat_tipo_estimacion"
 
@@ -72,7 +97,7 @@ class CatTipoEstimacion(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 6. Catálogo de Tipos de Póliza de Fianza (RF-ADM-04, RF-ADM-05)
+# 8. Catálogo de Tipos de Póliza de Fianza
 class CatTipoPoliza(SQLModel, table=True):
     __tablename__ = "cat_tipo_poliza"
 
@@ -82,7 +107,7 @@ class CatTipoPoliza(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 7. Catálogo de Tipos de Nota de Bitácora y Reglas por Rol (RF-SUPT-05, RF-SUP-03, RF-RES-01)
+# 9. Catálogo de Tipos de Nota de Bitácora
 class CatTipoNotaBitacora(SQLModel, table=True):
     __tablename__ = "cat_tipo_nota_bitacora"
 
@@ -96,7 +121,7 @@ class CatTipoNotaBitacora(SQLModel, table=True):
     rol_exclusivo: Optional[RolUsuario] = Relationship()
 
 
-# 8. Catálogo de Tipos de Ensayo de Laboratorio (RF-SUP-03, RN-SUP-03.3)
+# 10. Catálogo de Tipos de Ensayo de Laboratorio
 class CatTipoEnsayo(SQLModel, table=True):
     __tablename__ = "cat_tipo_ensayo"
 
@@ -107,7 +132,7 @@ class CatTipoEnsayo(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 9. Catálogo de Tipos de Acción de Auditoría (RF-ADM-05, RNF-SEG-03)
+# 11. Catálogo de Tipos de Acción de Auditoría
 class TipoAccion(SQLModel, table=True):
     __tablename__ = "tipo_accion"
 
@@ -118,7 +143,7 @@ class TipoAccion(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 10. Padrón de Empresas Contratistas (3NF)
+# 12. Padrón de Empresas Contratistas
 class Contratistas(SQLModel, table=True):
     __tablename__ = "contratistas"
 
@@ -131,7 +156,7 @@ class Contratistas(SQLModel, table=True):
     correos_autorizados: List["CatCorreosAutorizados"] = Relationship(back_populates="contratista")
 
 
-# 11. Diccionario de Correos y Dominios Autorizados (RN-ADM-01.8 a RN-ADM-01.11, RNF-SEG-06)
+# 13. Diccionario de Correos y Dominios Autorizados
 class CatCorreosAutorizados(SQLModel, table=True):
     __tablename__ = "cat_correos_autorizados"
     __table_args__ = (
@@ -140,7 +165,7 @@ class CatCorreosAutorizados(SQLModel, table=True):
 
     id_correo_autorizado: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
     id_contratista: Optional[int] = Field(default=None, foreign_key="contratistas.id_contratista", index=True)
-    tipo_registro: str = Field(max_length=20)  # 'DOMINIO' o 'CORREO'
+    tipo_registro: str = Field(max_length=20)
     valor: str = Field(max_length=150, unique=True, index=True)
     activo: bool = Field(default=True)
 
@@ -148,10 +173,10 @@ class CatCorreosAutorizados(SQLModel, table=True):
 
 
 # =============================================================================
-# BLOQUE 2: TABLAS OPERATIVAS NORMALIZADAS EN 3NF
+# BLOQUE 2: TABLAS OPERATIVAS NORMALIZADAS EN 3NF ESTRICTA
 # =============================================================================
 
-# 12. Usuarios (RF-ADM-01, RN-ADM-01.1 a RN-ADM-01.11, RNF-SEG-01)
+# 14. Usuarios
 class Usuarios(SQLModel, table=True):
     __tablename__ = "usuarios"
 
@@ -167,7 +192,7 @@ class Usuarios(SQLModel, table=True):
     asignaciones: List["ObrasAsignaciones"] = Relationship(back_populates="usuario")
 
 
-# 13. Obras Públicas (RF-ADM-04)
+# 15. Obras Públicas
 class Obras(SQLModel, table=True):
     __tablename__ = "obras"
     __table_args__ = (
@@ -192,7 +217,7 @@ class Obras(SQLModel, table=True):
     reportes_diarios: List["ReporteDiarioSupervision"] = Relationship(back_populates="obra")
 
 
-# 14. Asignaciones de Personal Operativo y Historial de Relevos (RF-ADM-03, RN-ADM-03.5)
+# 16. Asignaciones de Personal Operativo
 class ObrasAsignaciones(SQLModel, table=True):
     __tablename__ = "obras_asignaciones"
     __table_args__ = (
@@ -212,7 +237,7 @@ class ObrasAsignaciones(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="asignaciones")
 
 
-# 15. Contratos Legales (3NF)
+# 17. Contratos Legales
 class Contratos(SQLModel, table=True):
     __tablename__ = "contratos"
     __table_args__ = (
@@ -233,7 +258,7 @@ class Contratos(SQLModel, table=True):
     polizas: List["Polizas"] = Relationship(back_populates="contrato")
 
 
-# 16. Pólizas de Fianza (RF-ADM-04, RF-DIR-03)
+# 18. Pólizas de Fianza
 class Polizas(SQLModel, table=True):
     __tablename__ = "polizas"
 
@@ -248,7 +273,7 @@ class Polizas(SQLModel, table=True):
     tipo_poliza: Optional[CatTipoPoliza] = Relationship()
 
 
-# 17. Catálogo de Conceptos de Obra (RF-SUPT-01, RF-RES-02, RF-RES-04)
+# 19. Catálogo de Conceptos de Obra (3NF: referencia id_subpartida -> Cat_Subpartidas -> Cat_Partidas)
 class ConceptosCatalogo(SQLModel, table=True):
     __tablename__ = "conceptos_catalogo"
     __table_args__ = (
@@ -262,6 +287,7 @@ class ConceptosCatalogo(SQLModel, table=True):
     id_obra: int = Field(foreign_key="obras.id_obra", index=True)
     id_tipo_concepto: int = Field(foreign_key="cat_tipo_concepto.id_tipo_concepto")
     id_unidad: int = Field(foreign_key="cat_unidades_medida.id_unidad")
+    id_subpartida: int = Field(foreign_key="cat_subpartidas.id_subpartida", index=True)
     clave_concepto: str = Field(max_length=100)
     descripcion: str = Field(sa_column=Column(Text, nullable=False))
     cantidad_presupuestada: Decimal = Field(
@@ -277,10 +303,11 @@ class ConceptosCatalogo(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="conceptos")
     tipo_concepto: Optional[CatTipoConcepto] = Relationship()
     unidad: Optional[CatUnidadesMedida] = Relationship()
+    subpartida_cat: Optional[CatSubpartidas] = Relationship()
     pruebas_calidad: List["ControlCalidadPruebas"] = Relationship(back_populates="concepto")
 
 
-# 18. Estimaciones de Obra (RF-SUPT-03, RF-SUPT-07 - Sin Números Generadores)
+# 20. Estimaciones de Obra
 class Estimaciones(SQLModel, table=True):
     __tablename__ = "estimaciones"
     __table_args__ = (
@@ -318,7 +345,7 @@ class Estimaciones(SQLModel, table=True):
     pago: Optional["EstimacionesPagadas"] = Relationship(back_populates="estimacion")
 
 
-# 19. Revisión y Dictamen de Estimaciones con Plazo de 15 Días e Historial (RF-SUP-02, RF-SUP-06, RF-SUPT-07)
+# 21. Revisión y Dictamen de Estimaciones
 class RevisionEstimaciones(SQLModel, table=True):
     __tablename__ = "revision_estimaciones"
     __table_args__ = (
@@ -343,7 +370,7 @@ class RevisionEstimaciones(SQLModel, table=True):
     estatus_revision: Optional[CatEstatus] = Relationship()
 
 
-# 20. Documentos Fiscales CFDI (RF-SUPT-06)
+# 22. Documentos Fiscales CFDI
 class FacturacionEstimacion(SQLModel, table=True):
     __tablename__ = "facturacion_estimacion"
     __table_args__ = (
@@ -361,7 +388,7 @@ class FacturacionEstimacion(SQLModel, table=True):
     estimacion: Optional[Estimaciones] = Relationship(back_populates="facturacion")
 
 
-# 21. Estimaciones Pagadas (3NF)
+# 23. Estimaciones Pagadas
 class EstimacionesPagadas(SQLModel, table=True):
     __tablename__ = "estimaciones_pagadas"
     __table_args__ = (
@@ -378,15 +405,11 @@ class EstimacionesPagadas(SQLModel, table=True):
     estatus_pago: Optional[CatEstatus] = Relationship()
 
 
-# 22. Reporte Diario de Supervisión con Ciclo de Firma y Avance Físico (RF-SUP-03, RN-SUP-03.2 a RN-SUP-03.6)
+# 24. Reporte Diario de Supervisión (3NF: id_estatus_reporte FK -> Cat_Estatus, sin columna firmado redundante)
 class ReporteDiarioSupervision(SQLModel, table=True):
     __tablename__ = "reporte_diario_supervision"
     __table_args__ = (
         UniqueConstraint("id_obra", "fecha_reporte", name="uq_reporte_diario_obra_fecha"),
-        CheckConstraint(
-            "estatus_reporte IN ('BORRADOR', 'ENVIADO', 'FIRMADO')",
-            name="chk_estatus_reporte_supervision"
-        ),
         CheckConstraint(
             "estado_fuerza_trabajo IS NULL OR estado_fuerza_trabajo >= 0",
             name="chk_fuerza_trabajo_no_negativa"
@@ -400,8 +423,8 @@ class ReporteDiarioSupervision(SQLModel, table=True):
     id_reporte: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
     id_obra: int = Field(foreign_key="obras.id_obra", index=True)
     id_supervisor: int = Field(foreign_key="usuarios.id_usuario")
+    id_estatus_reporte: int = Field(foreign_key="cat_estatus.id_estatus", index=True)
     fecha_reporte: date
-    estatus_reporte: str = Field(default="BORRADOR", max_length=20)
     clima: Optional[str] = Field(default=None, max_length=100)
     estado_fuerza_trabajo: Optional[int] = Field(default=0)
     maquinaria_activa: Optional[str] = Field(default=None, sa_column=Column(Text))
@@ -409,16 +432,16 @@ class ReporteDiarioSupervision(SQLModel, table=True):
     porcentaje_avance_reportado: Optional[Decimal] = Field(
         default=None, sa_column=Column(Numeric(5, 2), nullable=True)
     )
-    firmado: bool = Field(default=False)
     sello_digital: Optional[str] = Field(default=None, max_length=255)
     fecha_envio: Optional[datetime] = Field(default=None)
     fecha_firma: Optional[datetime] = Field(default=None)
 
     obra: Optional[Obras] = Relationship(back_populates="reportes_diarios")
+    estatus_reporte_cat: Optional[CatEstatus] = Relationship()
     evidencias: List["EvidenciaAdjunta"] = Relationship(back_populates="reporte")
 
 
-# 23. Cortes Oficiales de Avance Físico y Financiero Real (RF-DIR-01, RN-DIR-01.6, RN-DIR-01.7, RN-SUP-03.5)
+# 25. Cortes Oficiales de Avance Físico y Financiero Real
 class AvancesFisicos(SQLModel, table=True):
     __tablename__ = "avances_fisicos"
     __table_args__ = (
@@ -441,7 +464,7 @@ class AvancesFisicos(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="avances_fisicos")
 
 
-# 24. Bitácora Electrónica de Obra Inmutable (RF-SUPT-05, RF-SUP-03, RF-RES-01, RF-RES-02, RNF-SEG-02)
+# 26. Bitácora Electrónica de Obra Inmutable
 class BitacoraNotas(SQLModel, table=True):
     __tablename__ = "bitacora_notas"
     __table_args__ = (
@@ -465,7 +488,7 @@ class BitacoraNotas(SQLModel, table=True):
     evidencias: List["EvidenciaAdjunta"] = Relationship(back_populates="nota")
 
 
-# 25. Evidencia Fotográfica Adjunta (Vinculada a Bitácora o a Reporte de Supervisión)
+# 27. Evidencia Fotográfica Adjunta
 class EvidenciaAdjunta(SQLModel, table=True):
     __tablename__ = "evidencia_adjunta"
     __table_args__ = (
@@ -486,7 +509,7 @@ class EvidenciaAdjunta(SQLModel, table=True):
     reporte: Optional[ReporteDiarioSupervision] = Relationship(back_populates="evidencias")
 
 
-# 26. Control de Calidad y Pruebas de Laboratorio (1NF y 3NF)
+# 28. Control de Calidad y Pruebas de Laboratorio
 class ControlCalidadPruebas(SQLModel, table=True):
     __tablename__ = "control_calidad_pruebas"
 
@@ -503,7 +526,7 @@ class ControlCalidadPruebas(SQLModel, table=True):
     estatus_dictamen: Optional[CatEstatus] = Relationship()
 
 
-# 27. Registro Inmutable de Auditoría (3NF)
+# 29. Registro Inmutable de Auditoría
 class AuditoriaLogs(SQLModel, table=True):
     __tablename__ = "auditoria_logs"
 

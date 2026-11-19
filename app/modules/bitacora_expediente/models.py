@@ -109,6 +109,7 @@ class ReporteDiarioSupervisionPublic(SQLModel):
     id_obra: int
     id_supervisor: int
     fecha_reporte: date
+    id_estatus_reporte: int
     estatus_reporte: str
     clima: Optional[str] = None
     estado_fuerza_trabajo: Optional[int] = None

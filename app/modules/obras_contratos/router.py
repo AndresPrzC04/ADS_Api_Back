@@ -1,5 +1,5 @@
-from typing import List
-from fastapi import APIRouter, Depends, Request, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
 from sqlmodel import Session, col, select
 from app.core.database import get_session
 from app.core.dependencies import (
@@ -161,7 +161,7 @@ def listar_polizas_contrato(
     return list(session.exec(select(Polizas).where(Polizas.id_contrato == id_contrato)).all())
 
 
-# --- 4. Catálogo de Conceptos y Precios Extraordinarios (RF-SUPT-01, RF-RES-04) ---
+# --- 4. Catálogo de Conceptos (JSON, Excel .xlsx, Subtotales por Partida y APU) ---
 @router.post(
     "/conceptos/importar-linea-base",
     response_model=List[models.ConceptoCatalogoPublic],
@@ -177,6 +177,33 @@ def importar_conceptos_linea_base(
     return service.CatalogoConceptosService.cargar_conceptos_ordinarios(session, conceptos_in)
 
 
+@router.post(
+    "/obras/{id_obra}/conceptos/importar-excel",
+    response_model=List[models.ConceptoCatalogoPublic],
+    status_code=status.HTTP_201_CREATED
+)
+async def importar_conceptos_desde_excel(
+    id_obra: int,
+    archivo: UploadFile = File(...),
+    hoja: Optional[str] = Query(
+        default=None,
+        description="Nombre de la hoja del presupuesto en el Excel (ej. M0448, M0470, M0690)."
+    ),
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+):
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    contenido = await archivo.read()
+    nombre = archivo.filename or "catalogo.xlsx"
+    return service.CatalogoConceptosService.importar_desde_excel(
+        session=session,
+        id_obra=id_obra,
+        contenido_archivo=contenido,
+        nombre_archivo=nombre,
+        nombre_hoja=hoja
+    )
+
+
 @router.get("/obras/{id_obra}/conceptos", response_model=List[models.ConceptoCatalogoPublic])
 def listar_conceptos_obra(
     id_obra: int,
@@ -184,7 +211,27 @@ def listar_conceptos_obra(
     current_user: Usuarios = Depends(get_current_user)
 ):
     verificar_participacion_en_obra(id_obra, session, current_user)
-    return list(session.exec(select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == id_obra)).all())
+    conceptos = list(
+        session.exec(
+            select(ConceptosCatalogo)
+            .where(ConceptosCatalogo.id_obra == id_obra)
+            .order_by(col(ConceptosCatalogo.id_concepto).asc())
+        ).all()
+    )
+    return [service.CatalogoConceptosService.enriquecer_concepto(session, c) for c in conceptos]
+
+
+@router.get(
+    "/obras/{id_obra}/conceptos/resumen-partidas",
+    response_model=models.ResumenPresupuestoObraPublic
+)
+def obtener_resumen_presupuesto_por_partidas(
+    id_obra: int,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
+):
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return service.CatalogoConceptosService.obtener_resumen_por_partidas(session, id_obra)
 
 
 @router.patch("/conceptos/{id_concepto}", response_model=models.ConceptoCatalogoPublic)

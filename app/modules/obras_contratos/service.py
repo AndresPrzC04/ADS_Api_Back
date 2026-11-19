@@ -1,6 +1,8 @@
+from collections import OrderedDict
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from io import BytesIO
+from typing import Dict, List, Optional
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, func, or_, select
 from app.core.security import (
@@ -11,6 +13,8 @@ from app.models_base import (
     AvancesFisicos,
     BitacoraNotas,
     CatEstatus,
+    CatPartidas,
+    CatSubpartidas,
     CatTipoConcepto,
     CatTipoEstimacion,
     CatTipoNotaBitacora,
@@ -34,6 +38,22 @@ from . import models
 
 def _redondear_2(valor: Decimal) -> Decimal:
     return valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+MAPA_UNIDADES_EXCEL: Dict[str, str] = {
+    "M²": "M2",
+    "M2": "M2",
+    "M³": "M3",
+    "M3": "M3",
+    "ML": "ML",
+    "M": "ML",
+    "KG": "KG",
+    "TON": "TON",
+    "PZA": "PZA",
+    "PZ": "PZA",
+    "PIEZA": "PZA",
+    "LOTE": "LOTE",
+}
 
 
 # ==========================================
@@ -389,13 +409,62 @@ class ObraContratoService:
 
 
 # ==========================================
-# 3. SERVICIO: CATÁLOGO DE CONCEPTOS Y APU EXTRAORDINARIOS (RF-SUPT-01, RF-RES-04)
+# 3. SERVICIO: CATÁLOGO DE CONCEPTOS POR PARTIDA/SUBPARTIDA, EXCEL Y APU (RF-SUPT-01, RF-RES-04)
 # ==========================================
 class CatalogoConceptosService:
     @staticmethod
+    def _resolver_o_crear_subpartida(session: Session, nombre_partida: str, nombre_subpartida: str) -> int:
+        """3NF: Resuelve o crea la partida y subpartida en Cat_Partidas y Cat_Subpartidas."""
+        p_norm = (nombre_partida or "GENERAL").strip() or "GENERAL"
+        s_norm = (nombre_subpartida or "GENERAL").strip() or "GENERAL"
+
+        partida = session.exec(select(CatPartidas).where(CatPartidas.nombre == p_norm)).first()
+        if not partida:
+            partida = CatPartidas(nombre=p_norm, activo=True)
+            session.add(partida)
+            session.flush()
+
+        subpartida = session.exec(
+            select(CatSubpartidas).where(
+                CatSubpartidas.id_partida == partida.id_partida,
+                CatSubpartidas.nombre == s_norm
+            )
+        ).first()
+        if not subpartida:
+            subpartida = CatSubpartidas(
+                id_partida=partida.id_partida,
+                nombre=s_norm,
+                activo=True
+            )
+            session.add(subpartida)
+            session.flush()
+        return subpartida.id_subpartida
+
+    @staticmethod
+    def enriquecer_concepto(session: Session, c: ConceptosCatalogo) -> models.ConceptoCatalogoPublic:
+        sub = session.get(CatSubpartidas, c.id_subpartida)
+        part = session.get(CatPartidas, sub.id_partida) if sub else None
+        return models.ConceptoCatalogoPublic(
+            id_concepto=c.id_concepto,
+            id_obra=c.id_obra,
+            id_tipo_concepto=c.id_tipo_concepto,
+            id_unidad=c.id_unidad,
+            id_subpartida=c.id_subpartida,
+            partida=part.nombre if part else "GENERAL",
+            subpartida=sub.nombre if sub else "GENERAL",
+            clave_concepto=c.clave_concepto,
+            descripcion=c.descripcion,
+            cantidad_presupuestada=c.cantidad_presupuestada,
+            cantidad_adicional_autorizada=c.cantidad_adicional_autorizada,
+            precio_unitario=c.precio_unitario,
+            dictamen_apu_url=c.dictamen_apu_url,
+            autorizado_por_residente=c.autorizado_por_residente
+        )
+
+    @staticmethod
     def cargar_conceptos_ordinarios(
         session: Session, conceptos_in: List[models.ConceptoCatalogoCreate]
-    ) -> List[ConceptosCatalogo]:
+    ) -> List[models.ConceptoCatalogoPublic]:
         if not conceptos_in:
             raise HTTPException(status_code=400, detail="Debe enviar al menos un concepto para cargar.")
 
@@ -457,12 +526,16 @@ class CatalogoConceptosService:
 
         creados: List[ConceptosCatalogo] = []
         for item in conceptos_in:
+            id_sub = CatalogoConceptosService._resolver_o_crear_subpartida(
+                session, item.partida, item.subpartida
+            )
             nuevo = ConceptosCatalogo(
                 id_obra=id_obra,
                 id_tipo_concepto=tipo_ord.id_tipo_concepto if tipo_ord else 1,
                 id_unidad=item.id_unidad,
+                id_subpartida=id_sub,
                 clave_concepto=item.clave_concepto.strip().upper(),
-                descripcion=item.descripcion,
+                descripcion=item.descripcion.strip(),
                 cantidad_presupuestada=item.cantidad_presupuestada,
                 cantidad_adicional_autorizada=Decimal("0.00"),
                 precio_unitario=item.precio_unitario,
@@ -475,12 +548,227 @@ class CatalogoConceptosService:
         session.commit()
         for c in creados:
             session.refresh(c)
-        return creados
+        return [CatalogoConceptosService.enriquecer_concepto(session, c) for c in creados]
+
+    @staticmethod
+    def importar_desde_excel(
+        session: Session,
+        id_obra: int,
+        contenido_archivo: bytes,
+        nombre_archivo: str,
+        nombre_hoja: Optional[str] = None
+    ) -> List[models.ConceptoCatalogoPublic]:
+        """
+        RN-SUPT-01.4 y RN-SUPT-01.5: Importa el catálogo de conceptos directamente desde un archivo
+        Excel (.xlsx) con formato de presupuesto por obra (Partida, Subpartida, Clave, Descripción,
+        Unidad, Cantidad, Costo directo unitario).
+        """
+        validar_formato_y_tamano_archivo(
+            nombre_o_ruta=nombre_archivo,
+            extensiones_validas=(".xlsx",),
+            tamano_bytes=len(contenido_archivo),
+            max_mb=10
+        )
+
+        import openpyxl
+
+        try:
+            wb = openpyxl.load_workbook(BytesIO(contenido_archivo), data_only=True)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No se pudo leer el archivo Excel (.xlsx): {exc}"
+            )
+
+        if nombre_hoja:
+            if nombre_hoja not in wb.sheetnames:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"La hoja '{nombre_hoja}' no existe en el libro. Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[nombre_hoja]
+        else:
+            ws = wb.active
+            if ws is None:
+                raise HTTPException(status_code=400, detail="El archivo Excel no contiene hojas activas.")
+
+        # Localizar automáticamente la fila de encabezados (Partida, Subpartida, Clave, Unidad, Cantidad, Costo...)
+        fila_encabezado = None
+        indices: Dict[str, int] = {}
+        for row_idx in range(1, min(30, ws.max_row + 1)):
+            celdas = [
+                str(ws.cell(row_idx, c).value or "").strip().lower()
+                for c in range(1, ws.max_column + 1)
+            ]
+            if "clave" in celdas and "cantidad" in celdas and "unidad" in celdas:
+                fila_encabezado = row_idx
+                for col_idx, texto in enumerate(celdas, start=1):
+                    if texto == "partida":
+                        indices["partida"] = col_idx
+                    elif texto == "subpartida":
+                        indices["subpartida"] = col_idx
+                    elif texto == "clave":
+                        indices["clave"] = col_idx
+                    elif "descrip" in texto:
+                        indices["descripcion"] = col_idx
+                    elif texto == "unidad":
+                        indices["unidad"] = col_idx
+                    elif texto == "cantidad":
+                        indices["cantidad"] = col_idx
+                    elif ("costo directo unitario" in texto or "precio unitario" in texto) and "letra" not in texto:
+                        indices["precio_unitario"] = col_idx
+                break
+
+        requeridas = {"clave", "descripcion", "unidad", "cantidad", "precio_unitario"}
+        if fila_encabezado is None or not requeridas.issubset(indices.keys()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Formato de Excel no reconocido. La hoja debe contener encabezados con: "
+                    "Partida, Subpartida, Clave, Descripción resumida, Unidad, Cantidad y Costo directo unitario."
+                )
+            )
+
+        unidades_db = list(
+            session.exec(select(CatUnidadesMedida).where(col(CatUnidadesMedida.activo).is_(True))).all()
+        )
+        mapa_unidades_id = {u.clave.upper(): u.id_unidad for u in unidades_db}
+
+        conceptos_parseados: List[models.ConceptoCatalogoCreate] = []
+        for row_idx in range(fila_encabezado + 1, ws.max_row + 1):
+            clave_val = ws.cell(row_idx, indices["clave"]).value
+            if clave_val is None or not str(clave_val).strip():
+                # Fin de la tabla de conceptos (antes del bloque de subtotales)
+                if conceptos_parseados:
+                    break
+                continue
+
+            partida_val = (
+                str(ws.cell(row_idx, indices["partida"]).value or "GENERAL").strip()
+                if "partida" in indices else "GENERAL"
+            )
+            subpartida_val = (
+                str(ws.cell(row_idx, indices["subpartida"]).value or "GENERAL").strip()
+                if "subpartida" in indices else "GENERAL"
+            )
+            desc_val = str(ws.cell(row_idx, indices["descripcion"]).value or "").strip()
+            unidad_raw = str(ws.cell(row_idx, indices["unidad"]).value or "").strip().upper()
+            clave_unidad = MAPA_UNIDADES_EXCEL.get(unidad_raw, unidad_raw)
+
+            if clave_unidad not in mapa_unidades_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Fila {row_idx}: La unidad '{unidad_raw}' (normalizada a '{clave_unidad}') "
+                        f"no existe activa en Cat_Unidades_Medida."
+                    )
+                )
+
+            try:
+                cant_dec = Decimal(str(ws.cell(row_idx, indices["cantidad"]).value))
+                pu_dec = _redondear_2(Decimal(str(ws.cell(row_idx, indices["precio_unitario"]).value)))
+            except (InvalidOperation, TypeError):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Fila {row_idx}: Cantidad o Costo directo unitario inválido para clave '{clave_val}'."
+                )
+
+            conceptos_parseados.append(
+                models.ConceptoCatalogoCreate(
+                    id_obra=id_obra,
+                    id_unidad=mapa_unidades_id[clave_unidad],
+                    partida=partida_val,
+                    subpartida=subpartida_val,
+                    clave_concepto=str(clave_val).strip().upper(),
+                    descripcion=desc_val,
+                    cantidad_presupuestada=cant_dec,
+                    precio_unitario=pu_dec
+                )
+            )
+
+        if not conceptos_parseados:
+            raise HTTPException(
+                status_code=400,
+                detail="No se encontraron renglones de conceptos válidos en la hoja seleccionada."
+            )
+
+        return CatalogoConceptosService.cargar_conceptos_ordinarios(session, conceptos_parseados)
+
+    @staticmethod
+    def obtener_resumen_por_partidas(
+        session: Session, id_obra: int
+    ) -> models.ResumenPresupuestoObraPublic:
+        """
+        RN-SUPT-01.4: Genera el desglose jerárquico del catálogo agrupado por Partida y Subpartida
+        con subtotales y total general calculado.
+        """
+        obra = ObraContratoService.obtener_obra(session, id_obra)
+        conceptos = list(
+            session.exec(
+                select(ConceptosCatalogo)
+                .where(ConceptosCatalogo.id_obra == id_obra)
+                .order_by(col(ConceptosCatalogo.id_concepto).asc())
+            ).all()
+        )
+
+        agrupado: "OrderedDict[str, OrderedDict[str, List[Decimal]]]" = OrderedDict()
+        total_calc = Decimal("0.00")
+
+        for c in conceptos:
+            sub = session.get(CatSubpartidas, c.id_subpartida)
+            part = session.get(CatPartidas, sub.id_partida) if sub else None
+            nombre_part = part.nombre if part else "GENERAL"
+            nombre_sub = sub.nombre if sub else "GENERAL"
+            importe = _redondear_2(c.cantidad_presupuestada * c.precio_unitario)
+            total_calc += importe
+            if nombre_part not in agrupado:
+                agrupado[nombre_part] = OrderedDict()
+            if nombre_sub not in agrupado[nombre_part]:
+                agrupado[nombre_part][nombre_sub] = []
+            agrupado[nombre_part][nombre_sub].append(importe)
+
+        partidas_resumen: List[models.SubtotalPartidaPublic] = []
+        for nombre_partida, sub_dict in agrupado.items():
+            sub_items: List[models.SubtotalSubpartidaPublic] = []
+            subtotal_partida = Decimal("0.00")
+            count_partida = 0
+            for nombre_sub, importes in sub_dict.items():
+                sub_total = sum(importes, Decimal("0.00"))
+                subtotal_partida += sub_total
+                count_partida += len(importes)
+                sub_items.append(
+                    models.SubtotalSubpartidaPublic(
+                        subpartida=nombre_sub,
+                        cantidad_conceptos=len(importes),
+                        importe_subtotal=_redondear_2(sub_total)
+                    )
+                )
+            partidas_resumen.append(
+                models.SubtotalPartidaPublic(
+                    partida=nombre_partida,
+                    cantidad_conceptos=count_partida,
+                    importe_subtotal=_redondear_2(subtotal_partida),
+                    subpartidas=sub_items
+                )
+            )
+
+        contrato = session.exec(select(Contratos).where(Contratos.id_obra == id_obra)).first()
+        tope = min(obra.presupuesto_total, contrato.monto_contrato) if contrato else obra.presupuesto_total
+
+        return models.ResumenPresupuestoObraPublic(
+            id_obra=obra.id_obra,
+            nombre_obra=obra.nombre_obra,
+            total_conceptos=len(conceptos),
+            total_presupuesto_calculado=_redondear_2(total_calc),
+            presupuesto_tope_obra=tope,
+            saldo_disponible_catalogo=max(Decimal("0.00"), _redondear_2(tope - total_calc)),
+            partidas=partidas_resumen
+        )
 
     @staticmethod
     def editar_concepto_ordinario(
         session: Session, id_concepto: int, concepto_in: models.ConceptoCatalogoUpdate
-    ) -> ConceptosCatalogo:
+    ) -> models.ConceptoCatalogoPublic:
         concepto = session.get(ConceptosCatalogo, id_concepto)
         if not concepto:
             raise HTTPException(status_code=404, detail="Concepto no encontrado.")
@@ -492,6 +780,16 @@ class CatalogoConceptosService:
             )
 
         datos = concepto_in.model_dump(exclude_unset=True)
+        nueva_part = datos.pop("partida", None)
+        nueva_sub = datos.pop("subpartida", None)
+        if nueva_part is not None or nueva_sub is not None:
+            sub_actual = session.get(CatSubpartidas, concepto.id_subpartida)
+            part_actual = session.get(CatPartidas, sub_actual.id_partida) if sub_actual else None
+            p_final = nueva_part or (part_actual.nombre if part_actual else "GENERAL")
+            s_final = nueva_sub or (sub_actual.nombre if sub_actual else "GENERAL")
+            concepto.id_subpartida = CatalogoConceptosService._resolver_o_crear_subpartida(
+                session, p_final, s_final
+            )
         for campo, valor in datos.items():
             setattr(concepto, campo, valor)
 
@@ -522,7 +820,7 @@ class CatalogoConceptosService:
         session.add(concepto)
         session.commit()
         session.refresh(concepto)
-        return concepto
+        return CatalogoConceptosService.enriquecer_concepto(session, concepto)
 
     @staticmethod
     def inyectar_concepto_extraordinario(
@@ -530,7 +828,7 @@ class CatalogoConceptosService:
         inyeccion_in: models.ConceptoExtraordinarioInyeccion,
         residente: Usuarios,
         ip_origen: str
-    ) -> ConceptosCatalogo:
+    ) -> models.ConceptoCatalogoPublic:
         obra = ObraContratoService.obtener_obra(session, inyeccion_in.id_obra)
         validar_formato_y_tamano_archivo(inyeccion_in.dictamen_apu_url, (".pdf",))
 
@@ -558,10 +856,14 @@ class CatalogoConceptosService:
             select(CatTipoConcepto).where(CatTipoConcepto.clave == "EXTRAORDINARIO")
         ).first()
 
+        id_sub_ext = CatalogoConceptosService._resolver_o_crear_subpartida(
+            session, inyeccion_in.partida, inyeccion_in.subpartida
+        )
         nuevo_ext = ConceptosCatalogo(
             id_obra=obra.id_obra,
             id_tipo_concepto=tipo_ext.id_tipo_concepto if tipo_ext else 2,
             id_unidad=inyeccion_in.id_unidad,
+            id_subpartida=id_sub_ext,
             clave_concepto=clave_norm,
             descripcion=inyeccion_in.descripcion,
             cantidad_presupuestada=inyeccion_in.cantidad_presupuestada,
@@ -583,7 +885,7 @@ class CatalogoConceptosService:
             descripcion=f"Concepto extraordinario {clave_norm} autorizado con APU",
             ip_origen=ip_origen
         )
-        return nuevo_ext
+        return CatalogoConceptosService.enriquecer_concepto(session, nuevo_ext)
 
 
 # ==========================================
@@ -592,7 +894,6 @@ class CatalogoConceptosService:
 class DirectivoFiniquitoService:
     @staticmethod
     def obtener_ultimo_avance_fisico(session: Session, id_obra: int) -> Decimal:
-        """Devuelve el último porcentaje_fisico oficial registrado en Avances_Fisicos para la obra."""
         ultimo = session.exec(
             select(AvancesFisicos)
             .where(AvancesFisicos.id_obra == id_obra)
@@ -602,20 +903,12 @@ class DirectivoFiniquitoService:
 
     @staticmethod
     def calcular_avances_obra(session: Session, obra: Obras, fecha_corte: Optional[date] = None) -> dict:
-        """
-        RF-DIR-01 (Sin Generadores ni Gantt):
-        - Avance Físico Real: último porcentaje_fisico registrado en Avances_Fisicos
-          (generado automáticamente al firmar reportes de supervisión en RF-SUP-03).
-        - Avance Financiero Real: suma de pagos liquidados (o revisiones aprobadas) / presupuesto_total.
-        """
         corte = fecha_corte or date.today()
         contrato = session.exec(select(Contratos).where(Contratos.id_obra == obra.id_obra)).first()
         monto_contrato = contrato.monto_contrato if contrato else obra.presupuesto_total
 
-        # 1. Avance físico real vigente en Avances_Fisicos
         pct_fisico_real = DirectivoFiniquitoService.obtener_ultimo_avance_fisico(session, obra.id_obra)
 
-        # 2. Avance financiero real (RN-DIR-01.4)
         pagos = list(
             session.exec(
                 select(EstimacionesPagadas)
@@ -647,7 +940,6 @@ class DirectivoFiniquitoService:
             if obra.presupuesto_total > 0 else Decimal("0.00")
         )
 
-        # 3. Alertas normativas de 15 días en revisiones pendientes (RF-SUP-06)
         est_pend = session.exec(
             select(CatEstatus).where(CatEstatus.ambito == "REVISION", CatEstatus.clave == "PENDIENTE")
         ).first()
@@ -690,11 +982,6 @@ class DirectivoFiniquitoService:
         fecha_corte: Optional[date] = None,
         id_reporte: Optional[int] = None
     ) -> AvancesFisicos:
-        """
-        RN-DIR-01.6, RN-DIR-01.7, RN-SUP-03.5 y RN-SUP-03.6:
-        - Garantiza que porcentaje_fisico_nuevo >= último porcentaje_fisico registrado.
-        - Garantiza que porcentaje_financiero_real <= porcentaje_fisico.
-        """
         obra = ObraContratoService.obtener_obra(session, id_obra)
         corte = fecha_corte or date.today()
         metricas = DirectivoFiniquitoService.calcular_avances_obra(session, obra, corte)
@@ -706,7 +993,6 @@ class DirectivoFiniquitoService:
             else avance_anterior
         )
 
-        # RN-DIR-01.7 y RN-SUP-03.6: Regla de Progresividad / No Retroceso
         if pct_fisico_final < avance_anterior:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -741,7 +1027,6 @@ class DirectivoFiniquitoService:
 
     @staticmethod
     def obtener_dashboard_ejecutivo(session: Session) -> List[models.DashboardObraItem]:
-        """RF-DIR-01: Tablero de control de avance físico y financiero de todas las obras."""
         obras = list(session.exec(select(Obras)).all())
         tablero: List[models.DashboardObraItem] = []
         for obra in obras:
