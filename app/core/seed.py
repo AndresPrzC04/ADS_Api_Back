@@ -1,5 +1,7 @@
 from sqlmodel import Session, select
 from app.core.database import engine, init_db
+from app.core.security import get_password_hash
+from app.models_base import Usuarios
 
 def seed_catalogos_base(session: Session) -> None:
     """
@@ -166,6 +168,18 @@ def seed_catalogos_base(session: Session) -> None:
             session.add(
                 CatTipoEnsayo(clave=clave, nombre=nombre, norma_referencia=norma, activo=True)
             )
+
+    if not session.exec(select(Usuarios).where(Usuarios.correo == "admin@obraspublicas.gob.mx")).first():
+        session.add(
+            Usuarios(
+                id_rol_usuario=mapa_roles["ADMINISTRADOR"],
+                nombre_completo="Administrador Titular",
+                correo="admin@obraspublicas.gob.mx",
+                password_hash=get_password_hash("Admin1234!"),
+                firma_electronica=get_password_hash("FIRMA-ADMIN-01"),
+                activo=True,
+            )
+        )
 
     session.commit()
 
