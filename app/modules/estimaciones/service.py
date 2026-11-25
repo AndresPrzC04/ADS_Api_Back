@@ -515,6 +515,7 @@ class RevisionEstimacionService:
                 descripcion=f"Rechazo técnico de estimación #{estimacion.numero_estimacion}: {dictamen_in.observaciones_rechazo}",
                 ip_origen=ip_origen
             )
+            session.refresh(revision)
             return models.RevisionEstimacionPublic(
                 **revision.model_dump(),
                 clave_estatus_revision="RECHAZADA"
@@ -597,6 +598,7 @@ class RevisionEstimacionService:
                 "ADVERTENCIA (RN-SUP-03.3): La obra cuenta con pruebas de laboratorio dictaminadas como RECHAZADO."
             )
 
+        session.refresh(revision)
         return models.RevisionEstimacionPublic(
             **revision.model_dump(),
             clave_estatus_revision="APROBADA",
