@@ -1,6 +1,6 @@
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List
+from typing import List, Optional, Tuple
 from fastapi import HTTPException, status
 from sqlmodel import Session, col, or_, select
 from app.core.security import (
@@ -9,17 +9,23 @@ from app.core.security import (
 )
 from app.models_base import (
     BitacoraNotas,
+    CatConceptosMaestro,
     CatEstatus,
     CatTipoEstimacion,
     CatTipoNotaBitacora,
-    ConceptosCatalogo,
+    CatTipoPoliza,
+    CatUnidadesMedida,
+    Contratistas,
     Contratos,
     ControlCalidadPruebas,
+    EstimacionDetalles,
     Estimaciones,
     EstimacionesPagadas,
     FacturacionEstimacion,
+    ObraConceptos,
     Obras,
     ObrasAsignaciones,
+    Polizas,
     ReporteDiarioSupervision,
     RevisionEstimaciones,
     RolUsuario,
@@ -28,6 +34,9 @@ from app.models_base import (
 from app.modules.obras_contratos.service import DirectivoFiniquitoService
 from app.modules.usuarios_accesos.service import AuditoriaService
 from . import models
+
+TASA_IVA = Decimal("0.16")
+TASA_RETENCION_SFP = Decimal("0.005")
 
 
 def _redondear_2(valor: Decimal) -> Decimal:
@@ -51,6 +60,94 @@ class EstimacionService:
         return est.id_estatus
 
     @staticmethod
+    def _calcular_totales_financieros(
+        monto_bruto: Decimal,
+        monto_amortizacion: Decimal,
+        retencion_atraso: Decimal,
+    ) -> Tuple[Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]:
+        bruto = _redondear_2(monto_bruto)
+        amort = _redondear_2(monto_amortizacion)
+        ret_atraso = _redondear_2(retencion_atraso)
+
+        if amort > bruto:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El monto de amortización no puede ser mayor al monto bruto de la estimación."
+            )
+
+        iva = ((bruto - amort) * TASA_IVA).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        ret_sfp = (bruto * TASA_RETENCION_SFP).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        neto = (bruto - amort + iva - ret_atraso - ret_sfp).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if neto < Decimal("0.00"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Las deducciones y retenciones exceden el importe total de la estimación."
+            )
+        return bruto, amort, iva, ret_atraso, ret_sfp, neto
+
+    @staticmethod
+    def _validar_y_calcular_detalles(
+        session: Session,
+        id_obra: int,
+        detalles_in: List[models.EstimacionDetalleCreate],
+        id_estimacion_excluir: Optional[int] = None,
+    ) -> Decimal:
+        id_rech = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "RECHAZADA")
+        vistos: set[int] = set()
+        monto_bruto_calc = Decimal("0.00")
+
+        for item in detalles_in:
+            if item.id_obra_concepto in vistos:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"El concepto de obra ID {item.id_obra_concepto} está duplicado en el detalle."
+                )
+            vistos.add(item.id_obra_concepto)
+
+            oc = session.get(ObraConceptos, item.id_obra_concepto)
+            if not oc or oc.id_obra != id_obra:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Concepto de obra ID {item.id_obra_concepto} no encontrado en la obra."
+                )
+
+            stmt_prev = (
+                select(EstimacionDetalles)
+                .join(Estimaciones)
+                .where(
+                    EstimacionDetalles.id_obra_concepto == oc.id_obra_concepto,
+                    Estimaciones.id_obra == id_obra,
+                    col(Estimaciones.id_estatus) != id_rech,
+                )
+            )
+            if id_estimacion_excluir is not None:
+                stmt_prev = stmt_prev.where(
+                    col(Estimaciones.id_estimacion) != id_estimacion_excluir
+                )
+
+            previos = list(session.exec(stmt_prev).all())
+            acumulado_anterior = sum(
+                (p.cantidad_estimada for p in previos), Decimal("0.00")
+            )
+            tope_cantidad = oc.cantidad_presupuestada + oc.cantidad_adicional_autorizada
+
+            if (acumulado_anterior + item.cantidad_estimada) > tope_cantidad:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Volumen excedido para concepto de obra ID {oc.id_obra_concepto}: "
+                        f"acumulado anterior ({acumulado_anterior}) + cantidad estimada ({item.cantidad_estimada}) "
+                        f"supera el tope autorizado ({tope_cantidad})."
+                    )
+                )
+
+            monto_bruto_calc += _redondear_2(item.cantidad_estimada * oc.precio_unitario)
+
+        return _redondear_2(monto_bruto_calc)
+
+    @staticmethod
     def _enriquecer_estimacion(session: Session, est: Estimaciones) -> models.EstimacionPublic:
         cat_est = session.get(CatEstatus, est.id_estatus)
         cat_tipo = session.get(CatTipoEstimacion, est.id_tipo_estimacion)
@@ -69,6 +166,9 @@ class EstimacionService:
             fecha_presentacion=est.fecha_presentacion,
             monto_bruto=est.monto_bruto,
             monto_amortizacion=est.monto_amortizacion,
+            iva=est.iva,
+            retencion_atraso=est.retencion_atraso,
+            retencion_sfp=est.retencion_sfp,
             monto_neto=est.monto_neto
         )
 
@@ -112,7 +212,7 @@ class EstimacionService:
             )
 
         tiene_catalogo = session.exec(
-            select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == obra.id_obra)
+            select(ObraConceptos).where(ObraConceptos.id_obra == obra.id_obra)
         ).first()
         if not tiene_catalogo:
             raise HTTPException(
@@ -123,11 +223,27 @@ class EstimacionService:
         if estimacion_in.periodo_fin < estimacion_in.periodo_inicio:
             raise HTTPException(status_code=400, detail="La fecha fin del periodo no puede ser menor a la de inicio.")
 
-        if estimacion_in.monto_amortizacion > estimacion_in.monto_bruto:
-            raise HTTPException(
-                status_code=400,
-                detail="El monto de amortización no puede ser mayor al monto bruto de la estimación."
+        if estimacion_in.detalles:
+            monto_bruto_base = EstimacionService._validar_y_calcular_detalles(
+                session=session,
+                id_obra=obra.id_obra,
+                detalles_in=estimacion_in.detalles,
             )
+        elif estimacion_in.monto_bruto is not None:
+            monto_bruto_base = estimacion_in.monto_bruto
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe enviar 'detalles' por concepto o capturar 'monto_bruto' mayor a 0."
+            )
+
+        bruto, amort, iva_calc, ret_atraso, ret_sfp, neto_calc = (
+            EstimacionService._calcular_totales_financieros(
+                monto_bruto=monto_bruto_base,
+                monto_amortizacion=estimacion_in.monto_amortizacion,
+                retencion_atraso=estimacion_in.retencion_atraso,
+            )
+        )
 
         tipo_est = session.get(CatTipoEstimacion, estimacion_in.id_tipo_estimacion)
         if not tipo_est or not tipo_est.activo:
@@ -170,10 +286,6 @@ class EstimacionService:
                     )
 
         id_borrador = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "BORRADOR")
-        monto_neto_calc = max(
-            Decimal("0.00"),
-            _redondear_2(estimacion_in.monto_bruto - estimacion_in.monto_amortizacion)
-        )
 
         nueva = Estimaciones(
             id_obra=obra.id_obra,
@@ -185,11 +297,25 @@ class EstimacionService:
             periodo_inicio=estimacion_in.periodo_inicio,
             periodo_fin=estimacion_in.periodo_fin,
             fecha_presentacion=date.today(),
-            monto_bruto=_redondear_2(estimacion_in.monto_bruto),
-            monto_amortizacion=_redondear_2(estimacion_in.monto_amortizacion),
-            monto_neto=monto_neto_calc
+            monto_bruto=bruto,
+            monto_amortizacion=amort,
+            iva=iva_calc,
+            retencion_atraso=ret_atraso,
+            retencion_sfp=ret_sfp,
+            monto_neto=neto_calc
         )
         session.add(nueva)
+        session.flush()
+
+        for det in estimacion_in.detalles:
+            session.add(
+                EstimacionDetalles(
+                    id_estimacion=nueva.id_estimacion,
+                    id_obra_concepto=det.id_obra_concepto,
+                    cantidad_estimada=_redondear_2(det.cantidad_estimada),
+                )
+            )
+
         session.commit()
         session.refresh(nueva)
 
@@ -208,7 +334,7 @@ class EstimacionService:
     def corregir_borrador_o_rechazada(
         session: Session, id_estimacion: int, est_in: models.EstimacionUpdate
     ) -> models.EstimacionPublic:
-        """RF-SUPT-07: Permite al Superintendente ajustar montos en BORRADOR o tras un RECHAZO."""
+        """RF-SUPT-07: Permite al Superintendente ajustar montos y detalles en BORRADOR o tras un RECHAZO."""
         est = EstimacionService.obtener_por_id(session, id_estimacion)
         cat_est = session.get(CatEstatus, est.id_estatus)
         if not cat_est or cat_est.clave not in {"BORRADOR", "RECHAZADA", "OBSERVADA"}:
@@ -217,18 +343,64 @@ class EstimacionService:
                 detail="RNF-SEG-02: Solo se pueden corregir estimaciones en estado BORRADOR o RECHAZADA."
             )
 
-        if est_in.monto_bruto is not None:
-            est.monto_bruto = _redondear_2(est_in.monto_bruto)
-        if est_in.monto_amortizacion is not None:
-            est.monto_amortizacion = _redondear_2(est_in.monto_amortizacion)
+        nuevo_bruto = est.monto_bruto
+        if est_in.detalles is not None:
+            if est_in.detalles:
+                nuevo_bruto = EstimacionService._validar_y_calcular_detalles(
+                    session=session,
+                    id_obra=est.id_obra,
+                    detalles_in=est_in.detalles,
+                    id_estimacion_excluir=est.id_estimacion,
+                )
+            elif est_in.monto_bruto is not None:
+                nuevo_bruto = est_in.monto_bruto
 
-        if est.monto_amortizacion > est.monto_bruto:
-            raise HTTPException(
-                status_code=400,
-                detail="El monto de amortización no puede exceder el monto bruto."
+            prev_detalles = list(
+                session.exec(
+                    select(EstimacionDetalles).where(
+                        EstimacionDetalles.id_estimacion == est.id_estimacion
+                    )
+                ).all()
             )
+            for d_prev in prev_detalles:
+                session.delete(d_prev)
+            session.flush()
+            for det in est_in.detalles:
+                session.add(
+                    EstimacionDetalles(
+                        id_estimacion=est.id_estimacion,
+                        id_obra_concepto=det.id_obra_concepto,
+                        cantidad_estimada=_redondear_2(det.cantidad_estimada),
+                    )
+                )
+        elif est_in.monto_bruto is not None:
+            nuevo_bruto = est_in.monto_bruto
 
-        est.monto_neto = max(Decimal("0.00"), _redondear_2(est.monto_bruto - est.monto_amortizacion))
+        nueva_amort = (
+            est_in.monto_amortizacion
+            if est_in.monto_amortizacion is not None
+            else est.monto_amortizacion
+        )
+        nueva_ret_atraso = (
+            est_in.retencion_atraso
+            if est_in.retencion_atraso is not None
+            else est.retencion_atraso
+        )
+
+        bruto, amort, iva_calc, ret_atraso, ret_sfp, neto_calc = (
+            EstimacionService._calcular_totales_financieros(
+                monto_bruto=nuevo_bruto,
+                monto_amortizacion=nueva_amort,
+                retencion_atraso=nueva_ret_atraso,
+            )
+        )
+        est.monto_bruto = bruto
+        est.monto_amortizacion = amort
+        est.iva = iva_calc
+        est.retencion_atraso = ret_atraso
+        est.retencion_sfp = ret_sfp
+        est.monto_neto = neto_calc
+
         session.add(est)
         session.commit()
         session.refresh(est)
@@ -245,6 +417,13 @@ class EstimacionService:
     def obtener_detalle_public(session: Session, id_estimacion: int) -> models.EstimacionPublicDetalle:
         est = EstimacionService.obtener_por_id(session, id_estimacion)
         base = EstimacionService._enriquecer_estimacion(session, est)
+        detalles = list(
+            session.exec(
+                select(EstimacionDetalles)
+                .where(EstimacionDetalles.id_estimacion == id_estimacion)
+                .order_by(col(EstimacionDetalles.id_estimacion_detalle).asc())
+            ).all()
+        )
         revisiones = RevisionEstimacionService.consultar_por_estimacion(session, id_estimacion)
         factura = session.exec(
             select(FacturacionEstimacion).where(FacturacionEstimacion.id_estimacion == id_estimacion)
@@ -253,9 +432,162 @@ class EstimacionService:
 
         return models.EstimacionPublicDetalle(
             **base.model_dump(),
+            detalles=[models.EstimacionDetallePublic(**d.model_dump()) for d in detalles],
             revisiones=revisiones,
             facturacion=models.FacturacionEstimacionPublic(**factura.model_dump()) if factura else None,
             pago=models.EstimacionPagadaPublic(**pago.model_dump()) if pago else None
+        )
+
+    @staticmethod
+    def obtener_caratula(
+        session: Session, id_estimacion: int
+    ) -> models.EstimacionCaratulaPublic:
+        """Calcula en vivo la carátula completa de la estimación por consulta + cálculo (sin duplicar datos en BD)."""
+        est = EstimacionService.obtener_por_id(session, id_estimacion)
+        obra = session.get(Obras, est.id_obra)
+        if not obra:
+            raise HTTPException(status_code=404, detail="Obra no encontrada.")
+
+        contrato = session.exec(
+            select(Contratos).where(Contratos.id_obra == est.id_obra)
+        ).first()
+        contratista = (
+            session.get(Contratistas, contrato.id_contratista) if contrato else None
+        )
+
+        numero_fianza_anticipo: Optional[str] = None
+        if contrato:
+            tipo_pol_ant = session.exec(
+                select(CatTipoPoliza).where(CatTipoPoliza.clave == "ANTICIPO")
+            ).first()
+            if tipo_pol_ant:
+                poliza_ant = session.exec(
+                    select(Polizas).where(
+                        Polizas.id_contrato == contrato.id_contrato,
+                        Polizas.id_tipo_poliza == tipo_pol_ant.id_tipo_poliza,
+                    )
+                ).first()
+                if poliza_ant:
+                    numero_fianza_anticipo = poliza_ant.numero_poliza
+
+        monto_contrato = contrato.monto_contrato if contrato else obra.presupuesto_total
+        monto_anticipo = contrato.monto_anticipo if contrato else Decimal("0.00")
+
+        tipo_est = session.get(CatTipoEstimacion, est.id_tipo_estimacion)
+        tipo_estimacion_str = tipo_est.clave if tipo_est else "ORDINARIA"
+
+        id_rech = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "RECHAZADA")
+        estimaciones_anteriores = list(
+            session.exec(
+                select(Estimaciones).where(
+                    Estimaciones.id_obra == est.id_obra,
+                    col(Estimaciones.numero_estimacion) < est.numero_estimacion,
+                    col(Estimaciones.id_estatus) != id_rech,
+                )
+            ).all()
+        )
+
+        importe_estimado = _redondear_2(est.monto_bruto)
+        acumulado_anterior = _redondear_2(
+            sum((e.monto_bruto for e in estimaciones_anteriores), Decimal("0.00"))
+        )
+        acumulado_actual = _redondear_2(acumulado_anterior + importe_estimado)
+        saldo_por_estimar = _redondear_2(max(Decimal("0.00"), monto_contrato - acumulado_actual))
+
+        amortizacion_actual = _redondear_2(est.monto_amortizacion)
+        amortizacion_acumulada_anterior = _redondear_2(
+            sum((e.monto_amortizacion for e in estimaciones_anteriores), Decimal("0.00"))
+        )
+        amortizacion_acumulada_actual = _redondear_2(
+            amortizacion_acumulada_anterior + amortizacion_actual
+        )
+        saldo_por_amortizar = _redondear_2(
+            max(Decimal("0.00"), monto_anticipo - amortizacion_acumulada_actual)
+        )
+
+        ids_est_anteriores = [e.id_estimacion for e in estimaciones_anteriores]
+        detalles_est = list(
+            session.exec(
+                select(EstimacionDetalles)
+                .where(EstimacionDetalles.id_estimacion == est.id_estimacion)
+                .order_by(col(EstimacionDetalles.id_estimacion_detalle).asc())
+            ).all()
+        )
+
+        detalles_caratula: List[models.EstimacionCaratulaDetallePublic] = []
+        for det in detalles_est:
+            oc = session.get(ObraConceptos, det.id_obra_concepto)
+            maestro = (
+                session.get(CatConceptosMaestro, oc.id_concepto_maestro) if oc else None
+            )
+            unidad_obj = (
+                session.get(CatUnidadesMedida, maestro.id_unidad) if maestro else None
+            )
+
+            if ids_est_anteriores:
+                det_prevs = list(
+                    session.exec(
+                        select(EstimacionDetalles).where(
+                            EstimacionDetalles.id_obra_concepto == det.id_obra_concepto,
+                            col(EstimacionDetalles.id_estimacion).in_(ids_est_anteriores),
+                        )
+                    ).all()
+                )
+                det_acum_ant = _redondear_2(
+                    sum((dp.cantidad_estimada for dp in det_prevs), Decimal("0.00"))
+                )
+            else:
+                det_acum_ant = Decimal("0.00")
+
+            det_cant = _redondear_2(det.cantidad_estimada)
+            det_acum_act = _redondear_2(det_acum_ant + det_cant)
+            tope_cant = (
+                (oc.cantidad_presupuestada + oc.cantidad_adicional_autorizada)
+                if oc
+                else Decimal("0.00")
+            )
+            det_saldo = _redondear_2(max(Decimal("0.00"), tope_cant - det_acum_act))
+            pu = _redondear_2(oc.precio_unitario) if oc else Decimal("0.00")
+            det_importe = _redondear_2(det_cant * pu)
+
+            detalles_caratula.append(
+                models.EstimacionCaratulaDetallePublic(
+                    id_obra_concepto=det.id_obra_concepto,
+                    clave_concepto=maestro.clave_concepto if maestro else "",
+                    descripcion=maestro.descripcion if maestro else "",
+                    unidad=unidad_obj.clave if unidad_obj else "",
+                    acumulado_anterior=det_acum_ant,
+                    cantidad_estimada=det_cant,
+                    acumulado_actual=det_acum_act,
+                    saldo=det_saldo,
+                    precio_unitario=pu,
+                    importe=det_importe,
+                )
+            )
+
+        return models.EstimacionCaratulaPublic(
+            numero_contrato=contrato.numero_contrato if contrato else None,
+            razon_social_contratista=contratista.razon_social if contratista else None,
+            rfc_contratista=contratista.rfc if contratista else None,
+            numero_fianza_anticipo=numero_fianza_anticipo,
+            monto_contrato=_redondear_2(monto_contrato),
+            monto_anticipo=_redondear_2(monto_anticipo),
+            fecha_presentacion=est.fecha_presentacion,
+            numero_estimacion=est.numero_estimacion,
+            tipo_estimacion=tipo_estimacion_str,
+            importe_estimado=importe_estimado,
+            acumulado_anterior=acumulado_anterior,
+            acumulado_actual=acumulado_actual,
+            saldo_por_estimar=saldo_por_estimar,
+            amortizacion_actual=amortizacion_actual,
+            amortizacion_acumulada_anterior=amortizacion_acumulada_anterior,
+            amortizacion_acumulada_actual=amortizacion_acumulada_actual,
+            saldo_por_amortizar=saldo_por_amortizar,
+            iva=_redondear_2(est.iva),
+            retencion_atraso=_redondear_2(est.retencion_atraso),
+            retencion_sfp=_redondear_2(est.retencion_sfp),
+            total_neto=_redondear_2(est.monto_neto),
+            detalles=detalles_caratula,
         )
 
     @staticmethod
@@ -278,6 +610,16 @@ class EstimacionService:
                 status_code=400,
                 detail="RNF-SEG-02: Solo se pueden eliminar estimaciones en estado BORRADOR."
             )
+        detalles_prev = list(
+            session.exec(
+                select(EstimacionDetalles).where(
+                    EstimacionDetalles.id_estimacion == est.id_estimacion
+                )
+            ).all()
+        )
+        for d in detalles_prev:
+            session.delete(d)
+        session.flush()
         session.delete(est)
         session.commit()
         return {"detalle": f"Estimación {id_estimacion} en borrador eliminada correctamente."}
@@ -363,7 +705,19 @@ class EstimacionService:
         if clave_actual in {"RECHAZADA", "OBSERVADA"}:
             est.version_subsanacion += 1
 
-        est.monto_neto = max(Decimal("0.00"), _redondear_2(est.monto_bruto - est.monto_amortizacion))
+        bruto, amort, iva_calc, ret_atraso, ret_sfp, neto_calc = (
+            EstimacionService._calcular_totales_financieros(
+                monto_bruto=est.monto_bruto,
+                monto_amortizacion=est.monto_amortizacion,
+                retencion_atraso=est.retencion_atraso,
+            )
+        )
+        est.monto_bruto = bruto
+        est.monto_amortizacion = amort
+        est.iva = iva_calc
+        est.retencion_atraso = ret_atraso
+        est.retencion_sfp = ret_sfp
+        est.monto_neto = neto_calc
         est.id_estatus = EstimacionService._obtener_estatus_id(session, "ESTIMACION", "EN_REVISION")
         est.fecha_presentacion = date.today()
         session.add(est)
@@ -433,9 +787,9 @@ class RevisionEstimacionService:
             return False
         prueba = session.exec(
             select(ControlCalidadPruebas)
-            .join(ConceptosCatalogo)
+            .join(ObraConceptos)
             .where(
-                ConceptosCatalogo.id_obra == id_obra,
+                ObraConceptos.id_obra == id_obra,
                 ControlCalidadPruebas.id_estatus_dictamen == est_rech.id_estatus
             )
         ).first()

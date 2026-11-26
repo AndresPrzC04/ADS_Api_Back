@@ -12,8 +12,8 @@ from app.core.dependencies import (
 )
 from app.models_base import (
     AvancesFisicos,
-    ConceptosCatalogo,
     Contratos,
+    ObraConceptos,
     Polizas,
     Usuarios,
 )
@@ -161,7 +161,79 @@ def listar_polizas_contrato(
     return list(session.exec(select(Polizas).where(Polizas.id_contrato == id_contrato)).all())
 
 
-# --- 4. Catálogo de Conceptos (JSON, Excel .xlsx, Subtotales por Partida y APU) ---
+# --- 4. Catálogo Maestro General y Conceptos de Obra (JSON, Excel .xlsx, Subtotales y APU) ---
+@router.get("/catalogo-maestro", response_model=List[models.ConceptoMaestroPublic])
+def listar_catalogo_maestro(
+    q: Optional[str] = Query(default=None, description="Búsqueda por clave_concepto o descripción."),
+    partida: Optional[str] = Query(default=None, description="Filtro opcional por nombre de partida."),
+    skip: int = 0,
+    limit: int = 200,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
+):
+    return service.CatalogoConceptosService.listar_catalogo_maestro(
+        session=session,
+        q=q,
+        partida=partida,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/catalogo-maestro",
+    response_model=models.ConceptoMaestroPublic,
+    status_code=status.HTTP_201_CREATED
+)
+def crear_concepto_catalogo_maestro(
+    concepto_in: models.ConceptoMaestroCreate,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["ADMINISTRADOR", "RESIDENTE"]))
+):
+    return service.CatalogoConceptosService.crear_concepto_maestro(session, concepto_in)
+
+
+@router.post(
+    "/catalogo-maestro/importar-excel",
+    response_model=List[models.ConceptoMaestroPublic],
+    status_code=status.HTTP_201_CREATED
+)
+async def importar_catalogo_maestro_excel(
+    archivo: UploadFile = File(...),
+    hoja: Optional[str] = Query(
+        default=None,
+        description="Nombre opcional de la hoja del libro/tabulador Excel."
+    ),
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["ADMINISTRADOR", "RESIDENTE"]))
+):
+    contenido = await archivo.read()
+    nombre = archivo.filename or "catalogo_maestro.xlsx"
+    return service.CatalogoConceptosService.importar_catalogo_maestro_desde_excel(
+        session=session,
+        contenido_archivo=contenido,
+        nombre_archivo=nombre,
+        nombre_hoja=hoja,
+    )
+
+
+@router.post(
+    "/obras/{id_obra}/catalogo",
+    response_model=List[models.ConceptoCatalogoPublic],
+    status_code=status.HTTP_201_CREATED
+)
+def cargar_catalogo_obra(
+    id_obra: int,
+    conceptos_in: List[models.ConceptoCatalogoCreate],
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
+):
+    verificar_participacion_en_obra(id_obra, session, current_user)
+    return service.CatalogoConceptosService.cargar_conceptos_ordinarios(
+        session, conceptos_in, id_obra_path=id_obra
+    )
+
+
 @router.post(
     "/conceptos/importar-linea-base",
     response_model=List[models.ConceptoCatalogoPublic],
@@ -172,14 +244,19 @@ def importar_conceptos_linea_base(
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
 ):
-    if conceptos_in:
+    if conceptos_in and conceptos_in[0].id_obra is not None:
         verificar_participacion_en_obra(conceptos_in[0].id_obra, session, current_user)
     return service.CatalogoConceptosService.cargar_conceptos_ordinarios(session, conceptos_in)
 
 
 @router.post(
+    "/obras/{id_obra}/catalogo/importar-excel",
+    response_model=models.ImportacionExcelObraPublic,
+    status_code=status.HTTP_201_CREATED
+)
+@router.post(
     "/obras/{id_obra}/conceptos/importar-excel",
-    response_model=List[models.ConceptoCatalogoPublic],
+    response_model=models.ImportacionExcelObraPublic,
     status_code=status.HTTP_201_CREATED
 )
 async def importar_conceptos_desde_excel(
@@ -213,9 +290,9 @@ def listar_conceptos_obra(
     verificar_participacion_en_obra(id_obra, session, current_user)
     conceptos = list(
         session.exec(
-            select(ConceptosCatalogo)
-            .where(ConceptosCatalogo.id_obra == id_obra)
-            .order_by(col(ConceptosCatalogo.id_concepto).asc())
+            select(ObraConceptos)
+            .where(ObraConceptos.id_obra == id_obra)
+            .order_by(col(ObraConceptos.id_obra_concepto).asc())
         ).all()
     )
     return [service.CatalogoConceptosService.enriquecer_concepto(session, c) for c in conceptos]
@@ -234,17 +311,17 @@ def obtener_resumen_presupuesto_por_partidas(
     return service.CatalogoConceptosService.obtener_resumen_por_partidas(session, id_obra)
 
 
-@router.patch("/conceptos/{id_concepto}", response_model=models.ConceptoCatalogoPublic)
+@router.patch("/conceptos/{id_obra_concepto}", response_model=models.ConceptoCatalogoPublic)
 def editar_concepto_antes_de_congelamiento(
-    id_concepto: int,
+    id_obra_concepto: int,
     concepto_in: models.ConceptoCatalogoUpdate,
     session: Session = Depends(get_session),
     current_user: Usuarios = Depends(RequerirRoles(["SUPERINTENDENTE", "ADMINISTRADOR"]))
 ):
-    conc = session.get(ConceptosCatalogo, id_concepto)
+    conc = session.get(ObraConceptos, id_obra_concepto)
     if conc:
         verificar_participacion_en_obra(conc.id_obra, session, current_user)
-    return service.CatalogoConceptosService.editar_concepto_ordinario(session, id_concepto, concepto_in)
+    return service.CatalogoConceptosService.editar_concepto_ordinario(session, id_obra_concepto, concepto_in)
 
 
 @router.post(
@@ -260,7 +337,7 @@ def inyectar_concepto_extraordinario(
 ):
     verificar_participacion_en_obra(inyeccion_in.id_obra, session, residente)
     ip = request.client.host if request.client else "127.0.0.1"
-    return service.CatalogoConceptosService.inyectar_concepto_extraordinario(
+    return service.CatalogoConceptosService.crear_concepto_extraordinario(
         session, inyeccion_in, residente, ip
     )
 

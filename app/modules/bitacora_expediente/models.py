@@ -31,7 +31,7 @@ class BitacoraNotaCreate(SQLModel):
     clave_tipo_nota: str = Field(max_length=50)
     asunto: str = Field(max_length=255)
     descripcion: str
-    id_concepto_adicional: Optional[int] = None
+    id_obra_concepto_adicional: Optional[int] = None
     cantidad_adicional_autorizada: Optional[Decimal] = Field(default=None, gt=0)
 
 
@@ -58,7 +58,7 @@ class BitacoraNotaPublic(SQLModel):
 # 3. CONTROL DE CALIDAD Y PRUEBAS DE LABORATORIO (Tabla 3NF: Control_Calidad_Pruebas)
 # =====================================================================
 class ControlCalidadPruebaCreate(SQLModel):
-    id_concepto: int
+    id_obra_concepto: int
     id_tipo_ensayo: int
     clave_dictamen: Literal["APROBADO", "RECHAZADO"]
     fecha_muestreo: date
@@ -68,7 +68,7 @@ class ControlCalidadPruebaCreate(SQLModel):
 
 class ControlCalidadPruebaPublic(SQLModel):
     id_prueba: int
-    id_concepto: int
+    id_obra_concepto: int
     id_tipo_ensayo: int
     id_estatus_dictamen: int
     clave_dictamen: Optional[str] = None
@@ -78,26 +78,52 @@ class ControlCalidadPruebaPublic(SQLModel):
 
 
 # =====================================================================
-# 4. REPORTE DIARIO DE SUPERVISIÓN CON CICLO BORRADOR -> ENVIADO -> FIRMADO (RF-SUP-03)
+# 4. REPORTE DIARIO DE SUPERVISIÓN E INCIDENTES (RF-SUP-03)
 # =====================================================================
+class ReporteIncidenteInput(SQLModel):
+    suceso: str
+    accion_solucion: Optional[str] = None
+    clave_estatus: Literal["CREADO", "EMITIDO", "ATENDIDO"] = "CREADO"
+
+
+class ReporteIncidenteEstatusUpdate(SQLModel):
+    clave_estatus: Literal["CREADO", "EMITIDO", "ATENDIDO"]
+    accion_solucion: Optional[str] = None
+
+
+class ReporteIncidentePublic(SQLModel):
+    id_incidente: int
+    id_reporte: int
+    id_estatus_incidente: int
+    clave_estatus: str
+    suceso: str
+    accion_solucion: Optional[str] = None
+
+
 class ReporteDiarioSupervisionCreate(SQLModel):
     """RN-SUP-03.4: Permite crear en estado BORRADOR con campos parciales / incompletos."""
     id_obra: int
     fecha_reporte: date = Field(default_factory=date.today)
-    clima: Optional[str] = Field(default=None, max_length=100)
-    estado_fuerza_trabajo: Optional[int] = Field(default=0, ge=0)
-    maquinaria_activa: Optional[str] = None
-    incidencias_relevantes: Optional[str] = None
+    actividades_realizadas: Optional[str] = None
+    clima: Optional[Literal["SOLEADO", "NUBLADO", "LLUVIOSO", "TORMENTA"]] = None
+    horas_lluvia: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, le=24)
+    maquinaria_cantidad: Optional[int] = Field(default=0, ge=0)
+    equipo_cantidad: Optional[int] = Field(default=0, ge=0)
+    personal_cantidad: Optional[int] = Field(default=0, ge=0)
     porcentaje_avance_reportado: Optional[Decimal] = Field(default=None, ge=0, le=100)
+    incidentes: List[ReporteIncidenteInput] = Field(default_factory=list)
 
 
 class ReporteDiarioSupervisionUpdate(SQLModel):
     """RN-SUP-03.4: Editable mientras se encuentre en BORRADOR o ENVIADO sin firma."""
-    clima: Optional[str] = Field(default=None, max_length=100)
-    estado_fuerza_trabajo: Optional[int] = Field(default=None, ge=0)
-    maquinaria_activa: Optional[str] = None
-    incidencias_relevantes: Optional[str] = None
+    actividades_realizadas: Optional[str] = None
+    clima: Optional[Literal["SOLEADO", "NUBLADO", "LLUVIOSO", "TORMENTA"]] = None
+    horas_lluvia: Optional[Decimal] = Field(default=None, ge=0, le=24)
+    maquinaria_cantidad: Optional[int] = Field(default=None, ge=0)
+    equipo_cantidad: Optional[int] = Field(default=None, ge=0)
+    personal_cantidad: Optional[int] = Field(default=None, ge=0)
     porcentaje_avance_reportado: Optional[Decimal] = Field(default=None, ge=0, le=100)
+    incidentes: Optional[List[ReporteIncidenteInput]] = None
 
 
 class ReporteDiarioFirmaInput(SQLModel):
@@ -111,14 +137,18 @@ class ReporteDiarioSupervisionPublic(SQLModel):
     fecha_reporte: date
     id_estatus_reporte: int
     estatus_reporte: str
+    actividades_realizadas: Optional[str] = None
     clima: Optional[str] = None
-    estado_fuerza_trabajo: Optional[int] = None
-    maquinaria_activa: Optional[str] = None
-    incidencias_relevantes: Optional[str] = None
+    horas_lluvia: Decimal
+    maquinaria_cantidad: int
+    equipo_cantidad: int
+    personal_cantidad: int
     porcentaje_avance_reportado: Optional[Decimal] = None
+    porcentaje_financiero_actual: Decimal = Decimal("0.00")
     firmado: bool
     sello_digital: Optional[str] = None
     fecha_envio: Optional[datetime] = None
     fecha_firma: Optional[datetime] = None
-    evidencias: List[EvidenciaAdjuntaPublic] = []
+    incidentes: List[ReporteIncidentePublic] = Field(default_factory=list)
+    evidencias: List[EvidenciaAdjuntaPublic] = Field(default_factory=list)
     advertencia_calidad: Optional[str] = None

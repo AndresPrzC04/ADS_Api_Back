@@ -10,9 +10,10 @@ from app.core.dependencies import (
 )
 from app.models_base import (
     BitacoraNotas,
-    ConceptosCatalogo,
     EvidenciaAdjunta,
+    ObraConceptos,
     ReporteDiarioSupervision,
+    ReporteIncidentes,
     Usuarios,
 )
 from . import models, service
@@ -164,6 +165,26 @@ def firmar_reporte_supervision(
     return service.SupervisionCalidadService.firmar_reporte(session, id_reporte, firma_in, supervisor, ip)
 
 
+@router.patch(
+    "/reportes-diarios/incidentes/{id_incidente}/estatus",
+    response_model=models.ReporteIncidentePublic
+)
+def actualizar_estatus_incidente_reporte(
+    id_incidente: int,
+    estatus_in: models.ReporteIncidenteEstatusUpdate,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(roles_operativos_obra)
+):
+    inc = session.get(ReporteIncidentes, id_incidente)
+    if inc:
+        reporte = session.get(ReporteDiarioSupervision, inc.id_reporte)
+        if reporte:
+            verificar_participacion_en_obra(reporte.id_obra, session, current_user)
+    return service.SupervisionCalidadService.actualizar_estatus_incidente(
+        session, id_incidente, estatus_in
+    )
+
+
 @router.get("/obras/{id_obra}/reportes-diarios", response_model=List[models.ReporteDiarioSupervisionPublic])
 def listar_reportes_diarios_obra(
     id_obra: int,
@@ -189,7 +210,7 @@ def registrar_prueba_calidad(
     session: Session = Depends(get_session),
     supervisor: Usuarios = Depends(solo_supervisor)
 ):
-    conc = session.get(ConceptosCatalogo, prueba_in.id_concepto)
+    conc = session.get(ObraConceptos, prueba_in.id_obra_concepto)
     if conc:
         verificar_participacion_en_obra(conc.id_obra, session, supervisor)
     return service.SupervisionCalidadService.registrar_prueba_calidad(session, prueba_in)

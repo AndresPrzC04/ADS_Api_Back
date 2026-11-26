@@ -83,22 +83,38 @@ class EstimacionPagadaPublic(SQLModel):
 
 
 # =====================================================================
-# 3. ESQUEMAS DE ESTIMACIÓN (CABECERA, SUBSANACIÓN Y DETALLE) (RF-SUPT-03, RF-SUPT-07)
+# 3. ESQUEMAS DE ESTIMACIÓN (CABECERA, DETALLES, SUBSANACIÓN Y CARÁTULA) (RF-SUPT-03, RF-SUPT-07)
 # =====================================================================
+class EstimacionDetalleCreate(SQLModel):
+    id_obra_concepto: int
+    cantidad_estimada: Decimal = Field(gt=0)
+
+
+class EstimacionDetallePublic(SQLModel):
+    id_estimacion_detalle: int
+    id_estimacion: int
+    id_obra_concepto: int
+    cantidad_estimada: Decimal
+
+
 class EstimacionCreate(SQLModel):
     id_obra: int
     id_tipo_estimacion: int
     numero_estimacion: int = Field(gt=0)
     periodo_inicio: date
     periodo_fin: date
-    monto_bruto: Decimal = Field(gt=0)
+    monto_bruto: Optional[Decimal] = Field(default=None, gt=0)
     monto_amortizacion: Decimal = Field(default=Decimal("0.00"), ge=0)
+    retencion_atraso: Decimal = Field(default=Decimal("0.00"), ge=0)
+    detalles: List[EstimacionDetalleCreate] = Field(default_factory=list)
 
 
 class EstimacionUpdate(SQLModel):
-    """Permite subsanar montos cuando la estimación está en BORRADOR o RECHAZADA (RF-SUPT-07)."""
+    """Permite subsanar montos y detalles cuando la estimación está en BORRADOR o RECHAZADA (RF-SUPT-07)."""
     monto_bruto: Optional[Decimal] = Field(default=None, gt=0)
     monto_amortizacion: Optional[Decimal] = Field(default=None, ge=0)
+    retencion_atraso: Optional[Decimal] = Field(default=None, ge=0)
+    detalles: Optional[List[EstimacionDetalleCreate]] = None
 
 
 class EstimacionPublic(SQLModel):
@@ -116,10 +132,55 @@ class EstimacionPublic(SQLModel):
     fecha_presentacion: date
     monto_bruto: Decimal
     monto_amortizacion: Decimal
+    iva: Decimal = Decimal("0.00")
+    retencion_atraso: Decimal = Decimal("0.00")
+    retencion_sfp: Decimal = Decimal("0.00")
     monto_neto: Decimal
 
 
 class EstimacionPublicDetalle(EstimacionPublic):
-    revisiones: List[RevisionEstimacionPublic] = []
+    detalles: List[EstimacionDetallePublic] = Field(default_factory=list)
+    revisiones: List[RevisionEstimacionPublic] = Field(default_factory=list)
     facturacion: Optional[FacturacionEstimacionPublic] = None
     pago: Optional[EstimacionPagadaPublic] = None
+
+
+class EstimacionCaratulaDetallePublic(SQLModel):
+    id_obra_concepto: int
+    clave_concepto: str
+    descripcion: str
+    unidad: str
+    acumulado_anterior: Decimal
+    cantidad_estimada: Decimal
+    acumulado_actual: Decimal
+    saldo: Decimal
+    precio_unitario: Decimal
+    importe: Decimal
+
+
+class EstimacionCaratulaPublic(SQLModel):
+    # Datos del contrato y contratista
+    numero_contrato: Optional[str] = None
+    razon_social_contratista: Optional[str] = None
+    rfc_contratista: Optional[str] = None
+    numero_fianza_anticipo: Optional[str] = None
+    monto_contrato: Decimal
+    monto_anticipo: Decimal
+    # Totales de la estimación
+    fecha_presentacion: date
+    numero_estimacion: int
+    tipo_estimacion: str
+    importe_estimado: Decimal
+    acumulado_anterior: Decimal
+    acumulado_actual: Decimal
+    saldo_por_estimar: Decimal
+    amortizacion_actual: Decimal
+    amortizacion_acumulada_anterior: Decimal
+    amortizacion_acumulada_actual: Decimal
+    saldo_por_amortizar: Decimal
+    iva: Decimal
+    retencion_atraso: Decimal
+    retencion_sfp: Decimal
+    total_neto: Decimal
+    # Desglose por concepto
+    detalles: List[EstimacionCaratulaDetallePublic] = Field(default_factory=list)

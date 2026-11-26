@@ -1,3 +1,4 @@
+from decimal import Decimal
 from sqlmodel import Session, select
 from app.core.database import engine, init_db
 from app.core.security import get_password_hash
@@ -9,8 +10,11 @@ def seed_catalogos_base(session: Session) -> None:
     Cat_Correos_Autorizados (RN-ADM-01.8) y los catálogos maestros (RF-ADM-05).
     """
     from app.models_base import (
+        CatConceptosMaestro,
         CatCorreosAutorizados,
         CatEstatus,
+        CatPartidas,
+        CatSubpartidas,
         CatTipoConcepto,
         CatTipoEnsayo,
         CatTipoEstimacion,
@@ -80,6 +84,14 @@ def seed_catalogos_base(session: Session) -> None:
         # Ámbito CALIDAD
         ("CALIDAD", "APROBADO", "Ensayo de Laboratorio Aprobado"),
         ("CALIDAD", "RECHAZADO", "Ensayo de Laboratorio Rechazado"),
+        # Ámbito REPORTE
+        ("REPORTE", "BORRADOR", "Reporte en Borrador"),
+        ("REPORTE", "ENVIADO", "Reporte Enviado"),
+        ("REPORTE", "FIRMADO", "Reporte Firmado Electrónicamente"),
+        # Ámbito INCIDENTE
+        ("INCIDENTE", "CREADO", "Incidente Creado"),
+        ("INCIDENTE", "EMITIDO", "Incidente Emitido"),
+        ("INCIDENTE", "ATENDIDO", "Incidente Atendido"),
     ]
     for ambito, clave, nombre in estatus_base:
         existe = session.exec(
@@ -97,9 +109,78 @@ def seed_catalogos_base(session: Session) -> None:
         ("PZA", "Pieza"),
         ("LOTE", "Lote"),
     ]
+    mapa_unidades: dict[str, int] = {}
     for clave, nombre in unidades_base:
-        if not session.exec(select(CatUnidadesMedida).where(CatUnidadesMedida.clave == clave)).first():
-            session.add(CatUnidadesMedida(clave=clave, nombre=nombre, activo=True))
+        unidad = session.exec(select(CatUnidadesMedida).where(CatUnidadesMedida.clave == clave)).first()
+        if not unidad:
+            unidad = CatUnidadesMedida(clave=clave, nombre=nombre, activo=True)
+            session.add(unidad)
+            session.flush()
+        mapa_unidades[clave] = unidad.id_unidad
+
+    # Precarga idempotente de 3 conceptos de ejemplo en Cat_Conceptos_Maestro (para pruebas de upsert Excel)
+    conceptos_maestro_base = [
+        (
+            "E01-041",
+            "Cimentación para edificio de cuatro niveles",
+            "Cimentación",
+            "Cimentación y desplante",
+            "M2",
+            Decimal("2231.26"),
+        ),
+        (
+            "E02-015",
+            "Concreto hidráulico f'c=250 kg/cm² en columnas y trabes",
+            "Estructura",
+            "Columnas y trabes de concreto",
+            "M3",
+            Decimal("3450.00"),
+        ),
+        (
+            "A01-010",
+            "Muro de tabique rojo recocido de 14 cm de espesor asentado con mortero cemento-arena",
+            "Albañilería",
+            "Muros de tabique",
+            "M2",
+            Decimal("485.50"),
+        ),
+    ]
+    for clave_c, desc_c, nom_part, nom_sub, clave_uni, precio_ref in conceptos_maestro_base:
+        partida = session.exec(select(CatPartidas).where(CatPartidas.nombre == nom_part)).first()
+        if not partida:
+            partida = CatPartidas(nombre=nom_part, activo=True)
+            session.add(partida)
+            session.flush()
+
+        subpartida = session.exec(
+            select(CatSubpartidas).where(
+                CatSubpartidas.id_partida == partida.id_partida,
+                CatSubpartidas.nombre == nom_sub,
+            )
+        ).first()
+        if not subpartida:
+            subpartida = CatSubpartidas(
+                id_partida=partida.id_partida,
+                nombre=nom_sub,
+                activo=True,
+            )
+            session.add(subpartida)
+            session.flush()
+
+        existe_cm = session.exec(
+            select(CatConceptosMaestro).where(CatConceptosMaestro.clave_concepto == clave_c)
+        ).first()
+        if not existe_cm:
+            session.add(
+                CatConceptosMaestro(
+                    id_subpartida=subpartida.id_subpartida,
+                    id_unidad=mapa_unidades[clave_uni],
+                    clave_concepto=clave_c,
+                    descripcion=desc_c,
+                    precio_referencia=precio_ref,
+                    activo=True,
+                )
+            )
 
     tipos_concepto = [
         ("ORDINARIO", "Concepto de Catálogo Original", False),

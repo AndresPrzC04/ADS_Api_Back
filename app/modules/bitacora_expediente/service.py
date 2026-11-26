@@ -8,16 +8,18 @@ from app.core.security import (
     validar_formato_y_tamano_archivo,
 )
 from app.models_base import (
+    AvancesFisicos,
     BitacoraNotas,
     CatEstatus,
     CatTipoEnsayo,
     CatTipoNotaBitacora,
-    ConceptosCatalogo,
     Contratos,
     ControlCalidadPruebas,
     EvidenciaAdjunta,
+    ObraConceptos,
     Obras,
     ReporteDiarioSupervision,
+    ReporteIncidentes,
     Usuarios,
 )
 from app.modules.obras_contratos.service import DirectivoFiniquitoService
@@ -171,15 +173,15 @@ class BitacoraService:
                     detail="RN-RES-01.1: La Nota #1 de APERTURA debe estar firmada electrónicamente por el Residente."
                 )
 
-        if nota_in.id_concepto_adicional is not None and nota_in.cantidad_adicional_autorizada is not None:
+        if nota_in.id_obra_concepto_adicional is not None and nota_in.cantidad_adicional_autorizada is not None:
             if rol_nombre != "RESIDENTE":
                 raise HTTPException(
                     status_code=403,
                     detail="RN-RES-02.1: Solo el Residente puede autorizar cantidades adicionales en catálogo."
                 )
-            conc = session.get(ConceptosCatalogo, nota_in.id_concepto_adicional)
+            conc = session.get(ObraConceptos, nota_in.id_obra_concepto_adicional)
             if not conc or conc.id_obra != obra.id_obra:
-                raise HTTPException(status_code=404, detail="Concepto para cantidad adicional no encontrado en la obra.")
+                raise HTTPException(status_code=404, detail="Concepto de obra para cantidad adicional no encontrado.")
             conc.cantidad_adicional_autorizada += nota_in.cantidad_adicional_autorizada
             session.add(conc)
 
@@ -430,6 +432,13 @@ class EvidenciaService:
 # ==========================================
 # 3. SERVICIO: CONTROL DE CALIDAD Y REPORTE DE SUPERVISIÓN CON AVANCE FÍSICO (RF-SUP-03)
 # ==========================================
+ORDEN_ESTATUS_INCIDENTE = {
+    "CREADO": 0,
+    "EMITIDO": 1,
+    "ATENDIDO": 2,
+}
+
+
 class SupervisionCalidadService:
     @staticmethod
     def _obtener_estatus_reporte_id(session: Session, clave: str) -> int:
@@ -444,6 +453,72 @@ class SupervisionCalidadService:
         return est.id_estatus
 
     @staticmethod
+    def _obtener_estatus_incidente_id(session: Session, clave: str) -> int:
+        clave_norm = clave.strip().upper()
+        est = session.exec(
+            select(CatEstatus).where(CatEstatus.ambito == "INCIDENTE", CatEstatus.clave == clave_norm)
+        ).first()
+        if not est:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Estatus de incidente (INCIDENTE: {clave_norm}) no encontrado en Cat_Estatus."
+            )
+        return est.id_estatus
+
+    @staticmethod
+    def _obtener_ultimo_avance_financiero(session: Session, id_obra: int) -> Decimal:
+        ultimo = session.exec(
+            select(AvancesFisicos)
+            .where(AvancesFisicos.id_obra == id_obra)
+            .order_by(col(AvancesFisicos.id_avance).desc())
+        ).first()
+        return ultimo.porcentaje_financiero_real if ultimo else Decimal("0.00")
+
+    @staticmethod
+    def _enriquecer_incidente(
+        session: Session, inc: ReporteIncidentes
+    ) -> models.ReporteIncidentePublic:
+        est = session.get(CatEstatus, inc.id_estatus_incidente)
+        return models.ReporteIncidentePublic(
+            id_incidente=inc.id_incidente,
+            id_reporte=inc.id_reporte,
+            id_estatus_incidente=inc.id_estatus_incidente,
+            clave_estatus=est.clave if est else "CREADO",
+            suceso=inc.suceso,
+            accion_solucion=inc.accion_solucion,
+        )
+
+    @staticmethod
+    def _sincronizar_incidentes(
+        session: Session,
+        id_reporte: int,
+        incidentes_in: List[models.ReporteIncidenteInput],
+    ) -> None:
+        existentes = list(
+            session.exec(
+                select(ReporteIncidentes).where(ReporteIncidentes.id_reporte == id_reporte)
+            ).all()
+        )
+        for inc_prev in existentes:
+            session.delete(inc_prev)
+        session.flush()
+
+        for item in incidentes_in:
+            suceso_norm = item.suceso.strip()
+            if not suceso_norm:
+                continue
+            id_est_inc = SupervisionCalidadService._obtener_estatus_incidente_id(
+                session, item.clave_estatus
+            )
+            nuevo_inc = ReporteIncidentes(
+                id_reporte=id_reporte,
+                id_estatus_incidente=id_est_inc,
+                suceso=suceso_norm,
+                accion_solucion=item.accion_solucion.strip() if item.accion_solucion else None,
+            )
+            session.add(nuevo_inc)
+
+    @staticmethod
     def _enriquecer_reporte(
         session: Session,
         reporte: ReporteDiarioSupervision,
@@ -456,6 +531,16 @@ class SupervisionCalidadService:
                 select(EvidenciaAdjunta).where(EvidenciaAdjunta.id_reporte == reporte.id_reporte)
             ).all()
         )
+        incidentes = list(
+            session.exec(
+                select(ReporteIncidentes)
+                .where(ReporteIncidentes.id_reporte == reporte.id_reporte)
+                .order_by(col(ReporteIncidentes.id_incidente).asc())
+            ).all()
+        )
+        pct_financiero_actual = SupervisionCalidadService._obtener_ultimo_avance_financiero(
+            session, reporte.id_obra
+        )
         return models.ReporteDiarioSupervisionPublic(
             id_reporte=reporte.id_reporte,
             id_obra=reporte.id_obra,
@@ -463,15 +548,22 @@ class SupervisionCalidadService:
             fecha_reporte=reporte.fecha_reporte,
             id_estatus_reporte=reporte.id_estatus_reporte,
             estatus_reporte=clave_est,
+            actividades_realizadas=reporte.actividades_realizadas,
             clima=reporte.clima,
-            estado_fuerza_trabajo=reporte.estado_fuerza_trabajo,
-            maquinaria_activa=reporte.maquinaria_activa,
-            incidencias_relevantes=reporte.incidencias_relevantes,
+            horas_lluvia=reporte.horas_lluvia,
+            maquinaria_cantidad=reporte.maquinaria_cantidad,
+            equipo_cantidad=reporte.equipo_cantidad,
+            personal_cantidad=reporte.personal_cantidad,
             porcentaje_avance_reportado=reporte.porcentaje_avance_reportado,
+            porcentaje_financiero_actual=pct_financiero_actual,
             firmado=(clave_est == "FIRMADO"),
             sello_digital=reporte.sello_digital,
             fecha_envio=reporte.fecha_envio,
             fecha_firma=reporte.fecha_firma,
+            incidentes=[
+                SupervisionCalidadService._enriquecer_incidente(session, inc)
+                for inc in incidentes
+            ],
             evidencias=[models.EvidenciaAdjuntaPublic(**e.model_dump()) for e in evidencias],
             advertencia_calidad=advertencia_calidad
         )
@@ -506,9 +598,9 @@ class SupervisionCalidadService:
             return False
         prueba = session.exec(
             select(ControlCalidadPruebas)
-            .join(ConceptosCatalogo)
+            .join(ObraConceptos)
             .where(
-                ConceptosCatalogo.id_obra == id_obra,
+                ObraConceptos.id_obra == id_obra,
                 ControlCalidadPruebas.id_estatus_dictamen == est_rech.id_estatus
             )
         ).first()
@@ -558,14 +650,23 @@ class SupervisionCalidadService:
             id_supervisor=supervisor.id_usuario,
             id_estatus_reporte=id_est_borrador,
             fecha_reporte=reporte_in.fecha_reporte,
+            actividades_realizadas=reporte_in.actividades_realizadas,
             clima=reporte_in.clima,
-            estado_fuerza_trabajo=reporte_in.estado_fuerza_trabajo,
-            maquinaria_activa=reporte_in.maquinaria_activa,
-            incidencias_relevantes=reporte_in.incidencias_relevantes,
+            horas_lluvia=(
+                reporte_in.horas_lluvia if reporte_in.horas_lluvia is not None else Decimal("0.00")
+            ),
+            maquinaria_cantidad=reporte_in.maquinaria_cantidad or 0,
+            equipo_cantidad=reporte_in.equipo_cantidad or 0,
+            personal_cantidad=reporte_in.personal_cantidad or 0,
             porcentaje_avance_reportado=reporte_in.porcentaje_avance_reportado,
             sello_digital=None
         )
         session.add(nuevo)
+        session.flush()
+        if reporte_in.incidentes:
+            SupervisionCalidadService._sincronizar_incidentes(
+                session, nuevo.id_reporte, reporte_in.incidentes
+            )
         session.commit()
         session.refresh(nuevo)
         return SupervisionCalidadService._enriquecer_reporte(session, nuevo)
@@ -597,10 +698,23 @@ class SupervisionCalidadService:
             )
 
         datos = reporte_in.model_dump(exclude_unset=True)
+        datos.pop("incidentes", None)
+        no_nulos_default = {
+            "horas_lluvia": Decimal("0.00"),
+            "maquinaria_cantidad": 0,
+            "equipo_cantidad": 0,
+            "personal_cantidad": 0,
+        }
         for campo, valor in datos.items():
+            if campo in no_nulos_default and valor is None:
+                valor = no_nulos_default[campo]
             setattr(reporte, campo, valor)
 
         session.add(reporte)
+        if reporte_in.incidentes is not None:
+            SupervisionCalidadService._sincronizar_incidentes(
+                session, reporte.id_reporte, reporte_in.incidentes
+            )
         session.commit()
         session.refresh(reporte)
         return SupervisionCalidadService._enriquecer_reporte(session, reporte)
@@ -625,16 +739,14 @@ class SupervisionCalidadService:
             )
 
         faltantes = []
+        if not reporte.actividades_realizadas or not reporte.actividades_realizadas.strip():
+            faltantes.append("actividades_realizadas")
         if not reporte.clima or not reporte.clima.strip():
             faltantes.append("clima")
-        if reporte.estado_fuerza_trabajo is None:
-            faltantes.append("estado_fuerza_trabajo")
         if reporte.porcentaje_avance_reportado is None:
             faltantes.append("porcentaje_avance_reportado")
-        if not reporte.maquinaria_activa or not reporte.maquinaria_activa.strip():
-            faltantes.append("maquinaria_activa")
-        if not reporte.incidencias_relevantes or not reporte.incidencias_relevantes.strip():
-            faltantes.append("incidencias_relevantes")
+        if reporte.personal_cantidad is None or reporte.personal_cantidad <= 0:
+            faltantes.append("personal_cantidad")
 
         if faltantes:
             raise HTTPException(
@@ -653,6 +765,43 @@ class SupervisionCalidadService:
         session.commit()
         session.refresh(reporte)
         return SupervisionCalidadService._enriquecer_reporte(session, reporte)
+
+    @staticmethod
+    def actualizar_estatus_incidente(
+        session: Session,
+        id_incidente: int,
+        estatus_in: models.ReporteIncidenteEstatusUpdate,
+    ) -> models.ReporteIncidentePublic:
+        """Actualiza el semáforo del incidente (CREADO -> EMITIDO -> ATENDIDO) y opcionalmente accion_solucion."""
+        inc = session.get(ReporteIncidentes, id_incidente)
+        if not inc:
+            raise HTTPException(status_code=404, detail="Incidente de reporte no encontrado.")
+
+        est_actual = session.get(CatEstatus, inc.id_estatus_incidente)
+        clave_actual = est_actual.clave if est_actual else "CREADO"
+        nueva_clave = estatus_in.clave_estatus.upper()
+
+        orden_actual = ORDEN_ESTATUS_INCIDENTE.get(clave_actual, 0)
+        orden_nuevo = ORDEN_ESTATUS_INCIDENTE.get(nueva_clave, 0)
+        if orden_nuevo < orden_actual:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Transición de estatus inválida para el incidente: no se puede retroceder "
+                    f"de '{clave_actual}' a '{nueva_clave}' (flujo: CREADO -> EMITIDO -> ATENDIDO)."
+                )
+            )
+
+        inc.id_estatus_incidente = SupervisionCalidadService._obtener_estatus_incidente_id(
+            session, nueva_clave
+        )
+        if estatus_in.accion_solucion is not None:
+            inc.accion_solucion = estatus_in.accion_solucion.strip() or None
+
+        session.add(inc)
+        session.commit()
+        session.refresh(inc)
+        return SupervisionCalidadService._enriquecer_incidente(session, inc)
 
     @staticmethod
     def firmar_reporte(
@@ -757,9 +906,9 @@ class SupervisionCalidadService:
     def registrar_prueba_calidad(
         session: Session, prueba_in: models.ControlCalidadPruebaCreate
     ) -> models.ControlCalidadPruebaPublic:
-        concepto = session.get(ConceptosCatalogo, prueba_in.id_concepto)
+        concepto = session.get(ObraConceptos, prueba_in.id_obra_concepto)
         if not concepto:
-            raise HTTPException(status_code=404, detail="Concepto no encontrado.")
+            raise HTTPException(status_code=404, detail="Concepto de obra no encontrado.")
 
         tipo_ensayo = session.get(CatTipoEnsayo, prueba_in.id_tipo_ensayo)
         if not tipo_ensayo or not tipo_ensayo.activo:
@@ -777,7 +926,7 @@ class SupervisionCalidadService:
             raise HTTPException(status_code=400, detail="Estatus de dictamen de calidad no válido.")
 
         nueva = ControlCalidadPruebas(
-            id_concepto=prueba_in.id_concepto,
+            id_obra_concepto=prueba_in.id_obra_concepto,
             id_tipo_ensayo=prueba_in.id_tipo_ensayo,
             id_estatus_dictamen=est_dictamen.id_estatus,
             fecha_muestreo=prueba_in.fecha_muestreo,
@@ -800,8 +949,8 @@ class SupervisionCalidadService:
         pruebas = list(
             session.exec(
                 select(ControlCalidadPruebas)
-                .join(ConceptosCatalogo)
-                .where(ConceptosCatalogo.id_obra == id_obra)
+                .join(ObraConceptos)
+                .where(ObraConceptos.id_obra == id_obra)
             ).all()
         )
         resultado: List[models.ControlCalidadPruebaPublic] = []

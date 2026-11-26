@@ -10,7 +10,7 @@ def utc_now() -> datetime:
 
 
 # =============================================================================
-# BLOQUE 1: CATÁLOGOS MAESTROS INSTITUCIONALES (29 Tablas en 3NF Estricta)
+# BLOQUE 1: CATÁLOGOS MAESTROS INSTITUCIONALES (32 Tablas en 3NF Estricta)
 # =============================================================================
 
 # 1. Catálogo de Roles Únicos del Sistema
@@ -86,7 +86,32 @@ class CatTipoConcepto(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 7. Catálogo de Tipos de Estimación
+# 7. Catálogo Maestro General de Conceptos de Obra (Libro / Tabulador 3NF)
+class CatConceptosMaestro(SQLModel, table=True):
+    __tablename__ = "cat_conceptos_maestro"
+    __table_args__ = (
+        CheckConstraint(
+            "precio_referencia IS NULL OR precio_referencia > 0",
+            name="chk_precio_ref_positivo"
+        ),
+    )
+
+    id_concepto_maestro: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    id_subpartida: int = Field(foreign_key="cat_subpartidas.id_subpartida", index=True)
+    id_unidad: int = Field(foreign_key="cat_unidades_medida.id_unidad")
+    clave_concepto: str = Field(max_length=100, unique=True, index=True)
+    descripcion: str = Field(sa_column=Column(Text, nullable=False))
+    precio_referencia: Optional[Decimal] = Field(
+        default=None, sa_column=Column(Numeric(15, 2), nullable=True)
+    )
+    activo: bool = Field(default=True)
+
+    subpartida_cat: Optional[CatSubpartidas] = Relationship()
+    unidad: Optional[CatUnidadesMedida] = Relationship()
+    obras_conceptos: List["ObraConceptos"] = Relationship(back_populates="concepto_maestro")
+
+
+# 8. Catálogo de Tipos de Estimación
 class CatTipoEstimacion(SQLModel, table=True):
     __tablename__ = "cat_tipo_estimacion"
 
@@ -97,7 +122,7 @@ class CatTipoEstimacion(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 8. Catálogo de Tipos de Póliza de Fianza
+# 9. Catálogo de Tipos de Póliza de Fianza
 class CatTipoPoliza(SQLModel, table=True):
     __tablename__ = "cat_tipo_poliza"
 
@@ -107,7 +132,7 @@ class CatTipoPoliza(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 9. Catálogo de Tipos de Nota de Bitácora
+# 10. Catálogo de Tipos de Nota de Bitácora
 class CatTipoNotaBitacora(SQLModel, table=True):
     __tablename__ = "cat_tipo_nota_bitacora"
 
@@ -121,7 +146,7 @@ class CatTipoNotaBitacora(SQLModel, table=True):
     rol_exclusivo: Optional[RolUsuario] = Relationship()
 
 
-# 10. Catálogo de Tipos de Ensayo de Laboratorio
+# 11. Catálogo de Tipos de Ensayo de Laboratorio
 class CatTipoEnsayo(SQLModel, table=True):
     __tablename__ = "cat_tipo_ensayo"
 
@@ -132,7 +157,7 @@ class CatTipoEnsayo(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 11. Catálogo de Tipos de Acción de Auditoría
+# 12. Catálogo de Tipos de Acción de Auditoría
 class TipoAccion(SQLModel, table=True):
     __tablename__ = "tipo_accion"
 
@@ -143,7 +168,7 @@ class TipoAccion(SQLModel, table=True):
     activo: bool = Field(default=True)
 
 
-# 12. Padrón de Empresas Contratistas
+# 13. Padrón de Empresas Contratistas
 class Contratistas(SQLModel, table=True):
     __tablename__ = "contratistas"
 
@@ -156,7 +181,7 @@ class Contratistas(SQLModel, table=True):
     correos_autorizados: List["CatCorreosAutorizados"] = Relationship(back_populates="contratista")
 
 
-# 13. Diccionario de Correos y Dominios Autorizados
+# 14. Diccionario de Correos y Dominios Autorizados
 class CatCorreosAutorizados(SQLModel, table=True):
     __tablename__ = "cat_correos_autorizados"
     __table_args__ = (
@@ -176,7 +201,7 @@ class CatCorreosAutorizados(SQLModel, table=True):
 # BLOQUE 2: TABLAS OPERATIVAS NORMALIZADAS EN 3NF ESTRICTA
 # =============================================================================
 
-# 14. Usuarios
+# 15. Usuarios
 class Usuarios(SQLModel, table=True):
     __tablename__ = "usuarios"
 
@@ -192,7 +217,7 @@ class Usuarios(SQLModel, table=True):
     asignaciones: List["ObrasAsignaciones"] = Relationship(back_populates="usuario")
 
 
-# 15. Obras Públicas
+# 16. Obras Públicas
 class Obras(SQLModel, table=True):
     __tablename__ = "obras"
     __table_args__ = (
@@ -210,14 +235,14 @@ class Obras(SQLModel, table=True):
     estatus: Optional[CatEstatus] = Relationship()
     asignaciones: List["ObrasAsignaciones"] = Relationship(back_populates="obra")
     contrato: Optional["Contratos"] = Relationship(back_populates="obra")
-    conceptos: List["ConceptosCatalogo"] = Relationship(back_populates="obra")
+    conceptos: List["ObraConceptos"] = Relationship(back_populates="obra")
     estimaciones: List["Estimaciones"] = Relationship(back_populates="obra")
     avances_fisicos: List["AvancesFisicos"] = Relationship(back_populates="obra")
     bitacora_notas: List["BitacoraNotas"] = Relationship(back_populates="obra")
     reportes_diarios: List["ReporteDiarioSupervision"] = Relationship(back_populates="obra")
 
 
-# 16. Asignaciones de Personal Operativo
+# 17. Asignaciones de Personal Operativo
 class ObrasAsignaciones(SQLModel, table=True):
     __tablename__ = "obras_asignaciones"
     __table_args__ = (
@@ -237,11 +262,15 @@ class ObrasAsignaciones(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="asignaciones")
 
 
-# 17. Contratos Legales
+# 18. Contratos Legales
 class Contratos(SQLModel, table=True):
     __tablename__ = "contratos"
     __table_args__ = (
         CheckConstraint("monto_contrato > 0", name="chk_monto_contrato_positivo"),
+        CheckConstraint(
+            "monto_anticipo >= 0 AND monto_anticipo <= monto_contrato",
+            name="chk_monto_anticipo_rango"
+        ),
     )
 
     id_contrato: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
@@ -250,6 +279,9 @@ class Contratos(SQLModel, table=True):
     id_estatus: int = Field(foreign_key="cat_estatus.id_estatus")
     numero_contrato: str = Field(max_length=100, unique=True, index=True)
     monto_contrato: Decimal = Field(sa_column=Column(Numeric(15, 2), nullable=False))
+    monto_anticipo: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
+    )
     archivo_contrato: Optional[str] = Field(default=None, max_length=255)
 
     obra: Optional[Obras] = Relationship(back_populates="contrato")
@@ -258,7 +290,7 @@ class Contratos(SQLModel, table=True):
     polizas: List["Polizas"] = Relationship(back_populates="contrato")
 
 
-# 18. Pólizas de Fianza
+# 19. Pólizas de Fianza
 class Polizas(SQLModel, table=True):
     __tablename__ = "polizas"
 
@@ -273,23 +305,20 @@ class Polizas(SQLModel, table=True):
     tipo_poliza: Optional[CatTipoPoliza] = Relationship()
 
 
-# 19. Catálogo de Conceptos de Obra (3NF: referencia id_subpartida -> Cat_Subpartidas -> Cat_Partidas)
-class ConceptosCatalogo(SQLModel, table=True):
-    __tablename__ = "conceptos_catalogo"
+# 20. Conceptos Asignados por Obra (3NF: Tabla asociativa Obras <-> Cat_Conceptos_Maestro)
+class ObraConceptos(SQLModel, table=True):
+    __tablename__ = "obra_conceptos"
     __table_args__ = (
-        UniqueConstraint("id_obra", "clave_concepto", name="uq_concepto_por_obra"),
+        UniqueConstraint("id_obra", "id_concepto_maestro", name="uq_concepto_maestro_por_obra"),
         CheckConstraint("cantidad_presupuestada >= 0", name="chk_cant_presupuestada"),
         CheckConstraint("cantidad_adicional_autorizada >= 0", name="chk_cant_adicional"),
         CheckConstraint("precio_unitario > 0", name="chk_precio_unitario_positivo"),
     )
 
-    id_concepto: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    id_obra_concepto: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
     id_obra: int = Field(foreign_key="obras.id_obra", index=True)
+    id_concepto_maestro: int = Field(foreign_key="cat_conceptos_maestro.id_concepto_maestro", index=True)
     id_tipo_concepto: int = Field(foreign_key="cat_tipo_concepto.id_tipo_concepto")
-    id_unidad: int = Field(foreign_key="cat_unidades_medida.id_unidad")
-    id_subpartida: int = Field(foreign_key="cat_subpartidas.id_subpartida", index=True)
-    clave_concepto: str = Field(max_length=100)
-    descripcion: str = Field(sa_column=Column(Text, nullable=False))
     cantidad_presupuestada: Decimal = Field(
         default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
     )
@@ -301,13 +330,12 @@ class ConceptosCatalogo(SQLModel, table=True):
     autorizado_por_residente: bool = Field(default=True)
 
     obra: Optional[Obras] = Relationship(back_populates="conceptos")
+    concepto_maestro: Optional[CatConceptosMaestro] = Relationship(back_populates="obras_conceptos")
     tipo_concepto: Optional[CatTipoConcepto] = Relationship()
-    unidad: Optional[CatUnidadesMedida] = Relationship()
-    subpartida_cat: Optional[CatSubpartidas] = Relationship()
-    pruebas_calidad: List["ControlCalidadPruebas"] = Relationship(back_populates="concepto")
+    pruebas_calidad: List["ControlCalidadPruebas"] = Relationship(back_populates="obra_concepto")
 
 
-# 20. Estimaciones de Obra
+# 21. Estimaciones de Obra
 class Estimaciones(SQLModel, table=True):
     __tablename__ = "estimaciones"
     __table_args__ = (
@@ -315,6 +343,9 @@ class Estimaciones(SQLModel, table=True):
         CheckConstraint("numero_estimacion > 0", name="chk_numero_estimacion_positivo"),
         CheckConstraint("version_subsanacion >= 1", name="chk_version_subsanacion_min"),
         CheckConstraint("periodo_fin >= periodo_inicio", name="chk_periodo_estimacion"),
+        CheckConstraint("iva >= 0", name="chk_iva_no_negativo"),
+        CheckConstraint("retencion_atraso >= 0", name="chk_retencion_atraso_no_negativa"),
+        CheckConstraint("retencion_sfp >= 0", name="chk_retencion_sfp_no_negativa"),
     )
 
     id_estimacion: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
@@ -333,6 +364,15 @@ class Estimaciones(SQLModel, table=True):
     monto_amortizacion: Decimal = Field(
         default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
     )
+    iva: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
+    )
+    retencion_atraso: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
+    )
+    retencion_sfp: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
+    )
     monto_neto: Decimal = Field(
         default=Decimal("0.00"), sa_column=Column(Numeric(15, 2), nullable=False)
     )
@@ -340,12 +380,30 @@ class Estimaciones(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="estimaciones")
     tipo_estimacion: Optional[CatTipoEstimacion] = Relationship()
     estatus: Optional[CatEstatus] = Relationship()
+    detalles: List["EstimacionDetalles"] = Relationship(back_populates="estimacion")
     revisiones: List["RevisionEstimaciones"] = Relationship(back_populates="estimacion")
     facturacion: Optional["FacturacionEstimacion"] = Relationship(back_populates="estimacion")
     pago: Optional["EstimacionesPagadas"] = Relationship(back_populates="estimacion")
 
 
-# 21. Revisión y Dictamen de Estimaciones
+# 22. Detalles por Concepto de Estimaciones (3NF)
+class EstimacionDetalles(SQLModel, table=True):
+    __tablename__ = "estimacion_detalles"
+    __table_args__ = (
+        UniqueConstraint("id_estimacion", "id_obra_concepto", name="uq_detalle_estimacion_concepto"),
+        CheckConstraint("cantidad_estimada > 0", name="chk_cant_estimada_pos"),
+    )
+
+    id_estimacion_detalle: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    id_estimacion: int = Field(foreign_key="estimaciones.id_estimacion", index=True)
+    id_obra_concepto: int = Field(foreign_key="obra_conceptos.id_obra_concepto", index=True)
+    cantidad_estimada: Decimal = Field(sa_column=Column(Numeric(15, 2), nullable=False))
+
+    estimacion: Optional[Estimaciones] = Relationship(back_populates="detalles")
+    obra_concepto: Optional[ObraConceptos] = Relationship()
+
+
+# 23. Revisión y Dictamen de Estimaciones
 class RevisionEstimaciones(SQLModel, table=True):
     __tablename__ = "revision_estimaciones"
     __table_args__ = (
@@ -370,7 +428,7 @@ class RevisionEstimaciones(SQLModel, table=True):
     estatus_revision: Optional[CatEstatus] = Relationship()
 
 
-# 22. Documentos Fiscales CFDI
+# 24. Documentos Fiscales CFDI
 class FacturacionEstimacion(SQLModel, table=True):
     __tablename__ = "facturacion_estimacion"
     __table_args__ = (
@@ -388,7 +446,7 @@ class FacturacionEstimacion(SQLModel, table=True):
     estimacion: Optional[Estimaciones] = Relationship(back_populates="facturacion")
 
 
-# 23. Estimaciones Pagadas
+# 25. Estimaciones Pagadas
 class EstimacionesPagadas(SQLModel, table=True):
     __tablename__ = "estimaciones_pagadas"
     __table_args__ = (
@@ -405,15 +463,22 @@ class EstimacionesPagadas(SQLModel, table=True):
     estatus_pago: Optional[CatEstatus] = Relationship()
 
 
-# 24. Reporte Diario de Supervisión (3NF: id_estatus_reporte FK -> Cat_Estatus, sin columna firmado redundante)
+# 26. Reporte Diario de Supervisión (3NF: id_estatus_reporte FK -> Cat_Estatus, incidentes en tabla hija)
 class ReporteDiarioSupervision(SQLModel, table=True):
     __tablename__ = "reporte_diario_supervision"
     __table_args__ = (
         UniqueConstraint("id_obra", "fecha_reporte", name="uq_reporte_diario_obra_fecha"),
         CheckConstraint(
-            "estado_fuerza_trabajo IS NULL OR estado_fuerza_trabajo >= 0",
-            name="chk_fuerza_trabajo_no_negativa"
+            "clima IS NULL OR clima IN ('SOLEADO', 'NUBLADO', 'LLUVIOSO', 'TORMENTA')",
+            name="chk_clima_reporte"
         ),
+        CheckConstraint(
+            "horas_lluvia >= 0 AND horas_lluvia <= 24",
+            name="chk_horas_lluvia"
+        ),
+        CheckConstraint("maquinaria_cantidad >= 0", name="chk_maquinaria_no_negativa"),
+        CheckConstraint("equipo_cantidad >= 0", name="chk_equipo_no_negativo"),
+        CheckConstraint("personal_cantidad >= 0", name="chk_personal_no_negativo"),
         CheckConstraint(
             "porcentaje_avance_reportado IS NULL OR (porcentaje_avance_reportado >= 0 AND porcentaje_avance_reportado <= 100)",
             name="chk_porcentaje_avance_rango"
@@ -425,10 +490,14 @@ class ReporteDiarioSupervision(SQLModel, table=True):
     id_supervisor: int = Field(foreign_key="usuarios.id_usuario")
     id_estatus_reporte: int = Field(foreign_key="cat_estatus.id_estatus", index=True)
     fecha_reporte: date
-    clima: Optional[str] = Field(default=None, max_length=100)
-    estado_fuerza_trabajo: Optional[int] = Field(default=0)
-    maquinaria_activa: Optional[str] = Field(default=None, sa_column=Column(Text))
-    incidencias_relevantes: Optional[str] = Field(default=None, sa_column=Column(Text))
+    actividades_realizadas: Optional[str] = Field(default=None, sa_column=Column(Text))
+    clima: Optional[str] = Field(default=None, max_length=20)
+    horas_lluvia: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(4, 2), nullable=False)
+    )
+    maquinaria_cantidad: int = Field(default=0)
+    equipo_cantidad: int = Field(default=0)
+    personal_cantidad: int = Field(default=0)
     porcentaje_avance_reportado: Optional[Decimal] = Field(
         default=None, sa_column=Column(Numeric(5, 2), nullable=True)
     )
@@ -439,9 +508,24 @@ class ReporteDiarioSupervision(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="reportes_diarios")
     estatus_reporte_cat: Optional[CatEstatus] = Relationship()
     evidencias: List["EvidenciaAdjunta"] = Relationship(back_populates="reporte")
+    incidentes: List["ReporteIncidentes"] = Relationship(back_populates="reporte")
 
 
-# 25. Cortes Oficiales de Avance Físico y Financiero Real
+# 27. Incidentes de Reporte Diario de Supervisión (3NF)
+class ReporteIncidentes(SQLModel, table=True):
+    __tablename__ = "reporte_incidentes"
+
+    id_incidente: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+    id_reporte: int = Field(foreign_key="reporte_diario_supervision.id_reporte", index=True)
+    id_estatus_incidente: int = Field(foreign_key="cat_estatus.id_estatus", index=True)
+    suceso: str = Field(sa_column=Column(Text, nullable=False))
+    accion_solucion: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+    reporte: Optional[ReporteDiarioSupervision] = Relationship(back_populates="incidentes")
+    estatus_incidente: Optional[CatEstatus] = Relationship()
+
+
+# 28. Cortes Oficiales de Avance Físico y Financiero Real
 class AvancesFisicos(SQLModel, table=True):
     __tablename__ = "avances_fisicos"
     __table_args__ = (
@@ -464,7 +548,7 @@ class AvancesFisicos(SQLModel, table=True):
     obra: Optional[Obras] = Relationship(back_populates="avances_fisicos")
 
 
-# 26. Bitácora Electrónica de Obra Inmutable
+# 29. Bitácora Electrónica de Obra Inmutable
 class BitacoraNotas(SQLModel, table=True):
     __tablename__ = "bitacora_notas"
     __table_args__ = (
@@ -488,7 +572,7 @@ class BitacoraNotas(SQLModel, table=True):
     evidencias: List["EvidenciaAdjunta"] = Relationship(back_populates="nota")
 
 
-# 27. Evidencia Fotográfica Adjunta
+# 30. Evidencia Fotográfica Adjunta
 class EvidenciaAdjunta(SQLModel, table=True):
     __tablename__ = "evidencia_adjunta"
     __table_args__ = (
@@ -509,24 +593,24 @@ class EvidenciaAdjunta(SQLModel, table=True):
     reporte: Optional[ReporteDiarioSupervision] = Relationship(back_populates="evidencias")
 
 
-# 28. Control de Calidad y Pruebas de Laboratorio
+# 31. Control de Calidad y Pruebas de Laboratorio
 class ControlCalidadPruebas(SQLModel, table=True):
     __tablename__ = "control_calidad_pruebas"
 
     id_prueba: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
-    id_concepto: int = Field(foreign_key="conceptos_catalogo.id_concepto", index=True)
+    id_obra_concepto: int = Field(foreign_key="obra_conceptos.id_obra_concepto", index=True)
     id_tipo_ensayo: int = Field(foreign_key="cat_tipo_ensayo.id_tipo_ensayo")
     id_estatus_dictamen: int = Field(foreign_key="cat_estatus.id_estatus")
     fecha_muestreo: date
     valor_obtenido: str = Field(max_length=100)
     url_reporte_laboratorio: str = Field(max_length=255)
 
-    concepto: Optional[ConceptosCatalogo] = Relationship(back_populates="pruebas_calidad")
+    obra_concepto: Optional[ObraConceptos] = Relationship(back_populates="pruebas_calidad")
     tipo_ensayo_cat: Optional[CatTipoEnsayo] = Relationship()
     estatus_dictamen: Optional[CatEstatus] = Relationship()
 
 
-# 29. Registro Inmutable de Auditoría
+# 32. Registro Inmutable de Auditoría
 class AuditoriaLogs(SQLModel, table=True):
     __tablename__ = "auditoria_logs"
 

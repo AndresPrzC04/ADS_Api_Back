@@ -54,6 +54,17 @@ def consultar_estimaciones_obra(
     return service.EstimacionService.consultar_por_obra(session, id_obra)
 
 
+@router.get("/{id_estimacion}/caratula", response_model=models.EstimacionCaratulaPublic)
+def obtener_caratula_estimacion(
+    id_estimacion: int,
+    session: Session = Depends(get_session),
+    current_user: Usuarios = Depends(get_current_user)
+):
+    est = service.EstimacionService.obtener_por_id(session, id_estimacion)
+    verificar_participacion_en_obra(est.id_obra, session, current_user)
+    return service.EstimacionService.obtener_caratula(session, id_estimacion)
+
+
 @router.get("/{id_estimacion}", response_model=models.EstimacionPublicDetalle)
 def obtener_detalle_estimacion(
     id_estimacion: int,

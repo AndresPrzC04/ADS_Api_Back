@@ -59,6 +59,7 @@ class ContratoCreate(SQLModel):
     id_contratista: int
     numero_contrato: str = Field(max_length=100)
     monto_contrato: Decimal = Field(gt=0)
+    monto_anticipo: Decimal = Field(default=Decimal("0.00"), ge=0)
     archivo_contrato: Optional[str] = Field(default=None, max_length=255)
 
 
@@ -66,6 +67,7 @@ class ContratoUpdate(SQLModel):
     id_contratista: Optional[int] = None
     numero_contrato: Optional[str] = Field(default=None, max_length=100)
     monto_contrato: Optional[Decimal] = Field(default=None, gt=0)
+    monto_anticipo: Optional[Decimal] = Field(default=None, ge=0)
     archivo_contrato: Optional[str] = Field(default=None, max_length=255)
 
 
@@ -76,6 +78,7 @@ class ContratoPublic(SQLModel):
     id_estatus: int
     numero_contrato: str
     monto_contrato: Decimal
+    monto_anticipo: Decimal = Decimal("0.00")
     archivo_contrato: Optional[str] = None
 
 
@@ -102,15 +105,38 @@ class PolizaPublic(SQLModel):
 
 
 # =====================================================================
-# 4. CATÁLOGO DE CONCEPTOS POR PARTIDA/SUBPARTIDA Y APU (RF-SUPT-01, RF-RES-04)
+# 4. CATÁLOGO MAESTRO GENERAL Y CONCEPTOS POR OBRA (RF-SUPT-01, RF-RES-04)
 # =====================================================================
-class ConceptoCatalogoCreate(SQLModel):
-    id_obra: int
+class ConceptoMaestroCreate(SQLModel):
     id_unidad: int
     partida: str = Field(default="GENERAL", max_length=120)
     subpartida: str = Field(default="GENERAL", max_length=120)
     clave_concepto: str = Field(max_length=100)
     descripcion: str
+    precio_referencia: Optional[Decimal] = Field(default=None, gt=0)
+
+
+class ConceptoMaestroPublic(SQLModel):
+    id_concepto_maestro: int
+    id_subpartida: int
+    partida: str
+    subpartida: str
+    id_unidad: int
+    unidad: str
+    clave_concepto: str
+    descripcion: str
+    precio_referencia: Optional[Decimal] = None
+    activo: bool
+
+
+class ConceptoCatalogoCreate(SQLModel):
+    id_obra: Optional[int] = None
+    id_concepto_maestro: Optional[int] = None
+    id_unidad: Optional[int] = None
+    partida: str = Field(default="GENERAL", max_length=120)
+    subpartida: str = Field(default="GENERAL", max_length=120)
+    clave_concepto: Optional[str] = Field(default=None, max_length=100)
+    descripcion: Optional[str] = None
     cantidad_presupuestada: Decimal = Field(ge=0)
     precio_unitario: Decimal = Field(gt=0)
 
@@ -140,7 +166,8 @@ class ConceptoExtraordinarioInyeccion(SQLModel):
 
 
 class ConceptoCatalogoPublic(SQLModel):
-    id_concepto: int
+    id_obra_concepto: int
+    id_concepto_maestro: int
     id_obra: int
     id_tipo_concepto: int
     id_unidad: int
@@ -149,11 +176,19 @@ class ConceptoCatalogoPublic(SQLModel):
     subpartida: str
     clave_concepto: str
     descripcion: str
+    precio_referencia: Optional[Decimal] = None
     cantidad_presupuestada: Decimal
     cantidad_adicional_autorizada: Decimal
     precio_unitario: Decimal
     dictamen_apu_url: Optional[str] = None
     autorizado_por_residente: bool
+
+
+class ImportacionExcelObraPublic(SQLModel):
+    reutilizados_maestro: int
+    nuevos_en_maestro: int
+    vinculados_a_obra: int
+    conceptos: List[ConceptoCatalogoPublic] = Field(default_factory=list)
 
 
 class SubtotalSubpartidaPublic(SQLModel):

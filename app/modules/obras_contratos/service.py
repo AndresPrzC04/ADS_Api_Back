@@ -12,6 +12,7 @@ from app.core.security import (
 from app.models_base import (
     AvancesFisicos,
     BitacoraNotas,
+    CatConceptosMaestro,
     CatEstatus,
     CatPartidas,
     CatSubpartidas,
@@ -20,12 +21,12 @@ from app.models_base import (
     CatTipoNotaBitacora,
     CatTipoPoliza,
     CatUnidadesMedida,
-    ConceptosCatalogo,
     Contratistas,
     Contratos,
     Estimaciones,
     EstimacionesPagadas,
     EvidenciaAdjunta,
+    ObraConceptos,
     Obras,
     ObrasAsignaciones,
     Polizas,
@@ -267,6 +268,12 @@ class ObraContratoService:
                 detail="El monto del contrato no puede superar el presupuesto total autorizado de la obra."
             )
 
+        if contrato_in.monto_anticipo > contrato_in.monto_contrato:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El monto de anticipo no puede superar el monto total del contrato."
+            )
+
         if contrato_in.archivo_contrato:
             validar_formato_y_tamano_archivo(contrato_in.archivo_contrato, (".pdf",))
 
@@ -292,6 +299,7 @@ class ObraContratoService:
             id_estatus=est_vigente.id_estatus if est_vigente else 1,
             numero_contrato=contrato_in.numero_contrato,
             monto_contrato=contrato_in.monto_contrato,
+            monto_anticipo=contrato_in.monto_anticipo,
             archivo_contrato=contrato_in.archivo_contrato
         )
         session.add(nuevo_contrato)
@@ -333,6 +341,18 @@ class ObraContratoService:
             raise HTTPException(
                 status_code=400,
                 detail="El monto del contrato no puede exceder el presupuesto total de la obra."
+            )
+
+        monto_cont_final = (
+            contrato_in.monto_contrato if contrato_in.monto_contrato is not None else contrato.monto_contrato
+        )
+        monto_ant_final = (
+            contrato_in.monto_anticipo if contrato_in.monto_anticipo is not None else contrato.monto_anticipo
+        )
+        if monto_ant_final > monto_cont_final:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El monto de anticipo no puede superar el monto total del contrato."
             )
 
         datos = contrato_in.model_dump(exclude_unset=True)
@@ -441,19 +461,334 @@ class CatalogoConceptosService:
         return subpartida.id_subpartida
 
     @staticmethod
-    def enriquecer_concepto(session: Session, c: ConceptosCatalogo) -> models.ConceptoCatalogoPublic:
-        sub = session.get(CatSubpartidas, c.id_subpartida)
+    def _resolver_o_crear_unidad(session: Session, unidad_raw: str) -> CatUnidadesMedida:
+        """3NF: Resuelve o crea la unidad de medida en Cat_Unidades_Medida."""
+        raw_norm = (unidad_raw or "").strip().upper()
+        clave_unidad = MAPA_UNIDADES_EXCEL.get(raw_norm, raw_norm)[:20]
+        if not clave_unidad:
+            clave_unidad = "PZA"
+
+        unidad = session.exec(
+            select(CatUnidadesMedida).where(CatUnidadesMedida.clave == clave_unidad)
+        ).first()
+        if not unidad:
+            unidad = CatUnidadesMedida(
+                clave=clave_unidad,
+                nombre=clave_unidad,
+                activo=True,
+            )
+            session.add(unidad)
+            session.flush()
+        elif not unidad.activo:
+            unidad.activo = True
+            session.add(unidad)
+            session.flush()
+        return unidad
+
+    @staticmethod
+    def _upsert_concepto_maestro(
+        session: Session,
+        id_subpartida: int,
+        id_unidad: int,
+        clave_concepto: str,
+        descripcion: str,
+        precio_referencia: Optional[Decimal] = None,
+    ) -> CatConceptosMaestro:
+        """3NF: Hace upsert por clave_concepto en el Catálogo Maestro General (Cat_Conceptos_Maestro)."""
+        clave_norm = clave_concepto.strip().upper()
+        desc_norm = descripcion.strip()
+        precio_val = (
+            _redondear_2(precio_referencia)
+            if (precio_referencia is not None and precio_referencia > Decimal("0.00"))
+            else None
+        )
+
+        maestro = session.exec(
+            select(CatConceptosMaestro).where(CatConceptosMaestro.clave_concepto == clave_norm)
+        ).first()
+        if maestro:
+            maestro.id_subpartida = id_subpartida
+            maestro.id_unidad = id_unidad
+            if desc_norm:
+                maestro.descripcion = desc_norm
+            if precio_val is not None:
+                maestro.precio_referencia = precio_val
+            maestro.activo = True
+            session.add(maestro)
+            session.flush()
+            return maestro
+
+        maestro = CatConceptosMaestro(
+            id_subpartida=id_subpartida,
+            id_unidad=id_unidad,
+            clave_concepto=clave_norm,
+            descripcion=desc_norm,
+            precio_referencia=precio_val,
+            activo=True,
+        )
+        session.add(maestro)
+        session.flush()
+        return maestro
+
+    @staticmethod
+    def enriquecer_concepto_maestro(
+        session: Session, m: CatConceptosMaestro
+    ) -> models.ConceptoMaestroPublic:
+        sub = session.get(CatSubpartidas, m.id_subpartida)
         part = session.get(CatPartidas, sub.id_partida) if sub else None
-        return models.ConceptoCatalogoPublic(
-            id_concepto=c.id_concepto,
-            id_obra=c.id_obra,
-            id_tipo_concepto=c.id_tipo_concepto,
-            id_unidad=c.id_unidad,
-            id_subpartida=c.id_subpartida,
+        uni = session.get(CatUnidadesMedida, m.id_unidad)
+        return models.ConceptoMaestroPublic(
+            id_concepto_maestro=m.id_concepto_maestro,
+            id_subpartida=m.id_subpartida,
             partida=part.nombre if part else "GENERAL",
             subpartida=sub.nombre if sub else "GENERAL",
-            clave_concepto=c.clave_concepto,
-            descripcion=c.descripcion,
+            id_unidad=m.id_unidad,
+            unidad=uni.clave if uni else "",
+            clave_concepto=m.clave_concepto,
+            descripcion=m.descripcion,
+            precio_referencia=m.precio_referencia,
+            activo=m.activo,
+        )
+
+    @staticmethod
+    def listar_catalogo_maestro(
+        session: Session,
+        q: Optional[str] = None,
+        partida: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 200,
+    ) -> List[models.ConceptoMaestroPublic]:
+        stmt = select(CatConceptosMaestro).where(col(CatConceptosMaestro.activo).is_(True))
+
+        if partida and partida.strip():
+            patron_partida = f"%{partida.strip()}%"
+            stmt = (
+                stmt.join(CatSubpartidas)
+                .join(CatPartidas)
+                .where(col(CatPartidas.nombre).ilike(patron_partida))
+            )
+
+        if q and q.strip():
+            patron_q = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    col(CatConceptosMaestro.clave_concepto).ilike(patron_q),
+                    col(CatConceptosMaestro.descripcion).ilike(patron_q),
+                )
+            )
+
+        limit_seguro = min(max(1, limit), 1000)
+        maestros = list(
+            session.exec(
+                stmt.order_by(col(CatConceptosMaestro.id_concepto_maestro).asc())
+                .offset(max(0, skip))
+                .limit(limit_seguro)
+            ).all()
+        )
+        return [CatalogoConceptosService.enriquecer_concepto_maestro(session, m) for m in maestros]
+
+    @staticmethod
+    def crear_concepto_maestro(
+        session: Session, concepto_in: models.ConceptoMaestroCreate
+    ) -> models.ConceptoMaestroPublic:
+        clave_norm = concepto_in.clave_concepto.strip().upper()
+        existente = session.exec(
+            select(CatConceptosMaestro).where(CatConceptosMaestro.clave_concepto == clave_norm)
+        ).first()
+        if existente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"La clave '{clave_norm}' ya existe en el Catálogo Maestro General."
+            )
+
+        unidad = session.get(CatUnidadesMedida, concepto_in.id_unidad)
+        if not unidad or not unidad.activo:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unidad de medida ID {concepto_in.id_unidad} no válida o inactiva."
+            )
+
+        id_sub = CatalogoConceptosService._resolver_o_crear_subpartida(
+            session, concepto_in.partida, concepto_in.subpartida
+        )
+        nuevo = CatConceptosMaestro(
+            id_subpartida=id_sub,
+            id_unidad=concepto_in.id_unidad,
+            clave_concepto=clave_norm,
+            descripcion=concepto_in.descripcion.strip(),
+            precio_referencia=(
+                _redondear_2(concepto_in.precio_referencia)
+                if concepto_in.precio_referencia is not None
+                else None
+            ),
+            activo=True,
+        )
+        session.add(nuevo)
+        session.commit()
+        session.refresh(nuevo)
+        return CatalogoConceptosService.enriquecer_concepto_maestro(session, nuevo)
+
+    @staticmethod
+    def importar_catalogo_maestro_desde_excel(
+        session: Session,
+        contenido_archivo: bytes,
+        nombre_archivo: str,
+        nombre_hoja: Optional[str] = None,
+    ) -> List[models.ConceptoMaestroPublic]:
+        """
+        Importa el libro/tabulador Excel (.xlsx) directo a Cat_Conceptos_Maestro haciendo upsert por
+        clave_concepto y creando automáticamente Cat_Partidas, Cat_Subpartidas y Cat_Unidades_Medida faltantes.
+        """
+        validar_formato_y_tamano_archivo(
+            nombre_o_ruta=nombre_archivo,
+            extensiones_validas=(".xlsx",),
+            tamano_bytes=len(contenido_archivo),
+            max_mb=10
+        )
+
+        import openpyxl
+
+        try:
+            wb = openpyxl.load_workbook(BytesIO(contenido_archivo), data_only=True)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No se pudo leer el archivo Excel (.xlsx): {exc}"
+            )
+
+        if nombre_hoja:
+            if nombre_hoja not in wb.sheetnames:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"La hoja '{nombre_hoja}' no existe en el libro. Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[nombre_hoja]
+        else:
+            ws = wb.active
+            if ws is None:
+                raise HTTPException(status_code=400, detail="El archivo Excel no contiene hojas activas.")
+
+        fila_encabezado = None
+        indices: Dict[str, int] = {}
+        for row_idx in range(1, min(30, ws.max_row + 1)):
+            celdas = [
+                str(ws.cell(row_idx, c).value or "").strip().lower()
+                for c in range(1, ws.max_column + 1)
+            ]
+            if "clave" in celdas and "unidad" in celdas and any("descrip" in c for c in celdas):
+                fila_encabezado = row_idx
+                for col_idx, texto in enumerate(celdas, start=1):
+                    if texto == "partida":
+                        indices["partida"] = col_idx
+                    elif texto == "subpartida":
+                        indices["subpartida"] = col_idx
+                    elif texto == "clave":
+                        indices["clave"] = col_idx
+                    elif "descrip" in texto:
+                        indices["descripcion"] = col_idx
+                    elif texto == "unidad":
+                        indices["unidad"] = col_idx
+                    elif (
+                        "costo directo unitario" in texto
+                        or "precio unitario" in texto
+                        or "precio referencia" in texto
+                        or "precio de referencia" in texto
+                        or "costo unitario" in texto
+                        or texto == "p.u."
+                    ) and "letra" not in texto:
+                        indices["precio_referencia"] = col_idx
+                break
+
+        requeridas = {"clave", "descripcion", "unidad"}
+        if fila_encabezado is None or not requeridas.issubset(indices.keys()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Formato de Excel no reconocido para el Catálogo Maestro. La hoja debe contener "
+                    "al menos las columnas: Clave, Descripción y Unidad (opcionales: Partida, Subpartida, Precio)."
+                )
+            )
+
+        procesados: "OrderedDict[int, CatConceptosMaestro]" = OrderedDict()
+        for row_idx in range(fila_encabezado + 1, ws.max_row + 1):
+            clave_val = ws.cell(row_idx, indices["clave"]).value
+            if clave_val is None or not str(clave_val).strip():
+                if procesados:
+                    break
+                continue
+
+            partida_val = (
+                str(ws.cell(row_idx, indices["partida"]).value or "GENERAL").strip()
+                if "partida" in indices else "GENERAL"
+            )
+            subpartida_val = (
+                str(ws.cell(row_idx, indices["subpartida"]).value or "GENERAL").strip()
+                if "subpartida" in indices else "GENERAL"
+            )
+            desc_val = str(ws.cell(row_idx, indices["descripcion"]).value or "").strip()
+            if not desc_val:
+                continue
+
+            unidad_raw = str(ws.cell(row_idx, indices["unidad"]).value or "").strip()
+            unidad_obj = CatalogoConceptosService._resolver_o_crear_unidad(session, unidad_raw)
+
+            precio_ref: Optional[Decimal] = None
+            if "precio_referencia" in indices:
+                raw_precio = ws.cell(row_idx, indices["precio_referencia"]).value
+                if raw_precio is not None and str(raw_precio).strip() != "":
+                    try:
+                        precio_dec = _redondear_2(Decimal(str(raw_precio)))
+                        if precio_dec > Decimal("0.00"):
+                            precio_ref = precio_dec
+                    except (InvalidOperation, TypeError):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Fila {row_idx}: Precio de referencia inválido para clave '{clave_val}'."
+                        )
+
+            id_sub = CatalogoConceptosService._resolver_o_crear_subpartida(
+                session, partida_val, subpartida_val
+            )
+            maestro = CatalogoConceptosService._upsert_concepto_maestro(
+                session=session,
+                id_subpartida=id_sub,
+                id_unidad=unidad_obj.id_unidad,
+                clave_concepto=str(clave_val),
+                descripcion=desc_val,
+                precio_referencia=precio_ref,
+            )
+            procesados[maestro.id_concepto_maestro] = maestro
+
+        if not procesados:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se encontraron renglones de conceptos válidos en la hoja seleccionada."
+            )
+
+        session.commit()
+        resultado: List[models.ConceptoMaestroPublic] = []
+        for m in procesados.values():
+            session.refresh(m)
+            resultado.append(CatalogoConceptosService.enriquecer_concepto_maestro(session, m))
+        return resultado
+
+    @staticmethod
+    def enriquecer_concepto(session: Session, c: ObraConceptos) -> models.ConceptoCatalogoPublic:
+        maestro = session.get(CatConceptosMaestro, c.id_concepto_maestro)
+        sub = session.get(CatSubpartidas, maestro.id_subpartida) if maestro else None
+        part = session.get(CatPartidas, sub.id_partida) if sub else None
+        return models.ConceptoCatalogoPublic(
+            id_obra_concepto=c.id_obra_concepto,
+            id_concepto_maestro=c.id_concepto_maestro,
+            id_obra=c.id_obra,
+            id_tipo_concepto=c.id_tipo_concepto,
+            id_unidad=maestro.id_unidad if maestro else 0,
+            id_subpartida=maestro.id_subpartida if maestro else 0,
+            partida=part.nombre if part else "GENERAL",
+            subpartida=sub.nombre if sub else "GENERAL",
+            clave_concepto=maestro.clave_concepto if maestro else "",
+            descripcion=maestro.descripcion if maestro else "",
+            precio_referencia=maestro.precio_referencia if maestro else None,
             cantidad_presupuestada=c.cantidad_presupuestada,
             cantidad_adicional_autorizada=c.cantidad_adicional_autorizada,
             precio_unitario=c.precio_unitario,
@@ -463,12 +798,17 @@ class CatalogoConceptosService:
 
     @staticmethod
     def cargar_conceptos_ordinarios(
-        session: Session, conceptos_in: List[models.ConceptoCatalogoCreate]
+        session: Session,
+        conceptos_in: List[models.ConceptoCatalogoCreate],
+        id_obra_path: Optional[int] = None,
     ) -> List[models.ConceptoCatalogoPublic]:
         if not conceptos_in:
             raise HTTPException(status_code=400, detail="Debe enviar al menos un concepto para cargar.")
 
-        id_obra = conceptos_in[0].id_obra
+        id_obra = id_obra_path if id_obra_path is not None else conceptos_in[0].id_obra
+        if id_obra is None:
+            raise HTTPException(status_code=400, detail="Debe especificar el id_obra de los conceptos.")
+
         obra = ObraContratoService.obtener_obra(session, id_obra)
 
         if ObraContratoService.linea_base_congelada(session, id_obra):
@@ -485,30 +825,74 @@ class CatalogoConceptosService:
 
         existentes = list(
             session.exec(
-                select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == id_obra)
+                select(ObraConceptos).where(ObraConceptos.id_obra == id_obra)
             ).all()
         )
         importe_actual = sum(
             (c.cantidad_presupuestada * c.precio_unitario for c in existentes),
             Decimal("0.00")
         )
-        claves_existentes = {c.clave_concepto.upper() for c in existentes}
+        ids_maestro_existentes: set[int] = {c.id_concepto_maestro for c in existentes}
+        claves_existentes: set[str] = set()
+        for c in existentes:
+            maestro_ex = session.get(CatConceptosMaestro, c.id_concepto_maestro)
+            if maestro_ex:
+                claves_existentes.add(maestro_ex.clave_concepto.upper())
 
         importe_nuevo = Decimal("0.00")
-        claves_lote = set()
+        ids_maestro_lote: set[int] = set()
+        claves_lote: set[str] = set()
         for item in conceptos_in:
-            if item.id_obra != id_obra:
+            if item.id_obra is not None and item.id_obra != id_obra:
                 raise HTTPException(status_code=400, detail="Todos los conceptos del lote deben pertenecer a la misma obra.")
-            clave_norm = item.clave_concepto.strip().upper()
-            if clave_norm in claves_existentes or clave_norm in claves_lote:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"RN-SUPT-01.2: La clave de concepto '{clave_norm}' ya existe en esta obra."
-                )
-            claves_lote.add(clave_norm)
-            unidad = session.get(CatUnidadesMedida, item.id_unidad)
-            if not unidad or not unidad.activo:
-                raise HTTPException(status_code=404, detail=f"Unidad de medida ID {item.id_unidad} no válida.")
+
+            if item.id_concepto_maestro is not None:
+                maestro_ref = session.get(CatConceptosMaestro, item.id_concepto_maestro)
+                if not maestro_ref or not maestro_ref.activo:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Concepto maestro ID {item.id_concepto_maestro} no encontrado o inactivo."
+                    )
+                clave_ref = maestro_ref.clave_concepto.upper()
+                if (
+                    maestro_ref.id_concepto_maestro in ids_maestro_existentes
+                    or maestro_ref.id_concepto_maestro in ids_maestro_lote
+                    or clave_ref in claves_existentes
+                    or clave_ref in claves_lote
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"RN-SUPT-01.2: El concepto maestro '{clave_ref}' ya existe en esta obra."
+                    )
+                ids_maestro_lote.add(maestro_ref.id_concepto_maestro)
+                claves_lote.add(clave_ref)
+            else:
+                if not item.clave_concepto or not item.clave_concepto.strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Debe proporcionar 'id_concepto_maestro' o 'clave_concepto' para cada renglón."
+                    )
+                if not item.descripcion or not item.descripcion.strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Debe proporcionar 'descripcion' para la clave '{item.clave_concepto}'."
+                    )
+                if item.id_unidad is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Debe proporcionar 'id_unidad' para la clave '{item.clave_concepto}'."
+                    )
+                clave_norm = item.clave_concepto.strip().upper()
+                if clave_norm in claves_existentes or clave_norm in claves_lote:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"RN-SUPT-01.2: La clave de concepto '{clave_norm}' ya existe en esta obra."
+                    )
+                claves_lote.add(clave_norm)
+                unidad = session.get(CatUnidadesMedida, item.id_unidad)
+                if not unidad or not unidad.activo:
+                    raise HTTPException(status_code=404, detail=f"Unidad de medida ID {item.id_unidad} no válida.")
+
             importe_nuevo += (item.cantidad_presupuestada * item.precio_unitario)
 
         if (importe_actual + importe_nuevo) > tope_financiero:
@@ -524,18 +908,31 @@ class CatalogoConceptosService:
             select(CatTipoConcepto).where(CatTipoConcepto.clave == "ORDINARIO")
         ).first()
 
-        creados: List[ConceptosCatalogo] = []
+        creados: List[ObraConceptos] = []
         for item in conceptos_in:
-            id_sub = CatalogoConceptosService._resolver_o_crear_subpartida(
-                session, item.partida, item.subpartida
-            )
-            nuevo = ConceptosCatalogo(
+            if item.id_concepto_maestro is not None:
+                id_maestro_final = item.id_concepto_maestro
+            else:
+                assert item.clave_concepto is not None
+                assert item.descripcion is not None
+                assert item.id_unidad is not None
+                id_sub = CatalogoConceptosService._resolver_o_crear_subpartida(
+                    session, item.partida, item.subpartida
+                )
+                maestro = CatalogoConceptosService._upsert_concepto_maestro(
+                    session=session,
+                    id_subpartida=id_sub,
+                    id_unidad=item.id_unidad,
+                    clave_concepto=item.clave_concepto,
+                    descripcion=item.descripcion,
+                    precio_referencia=item.precio_unitario,
+                )
+                id_maestro_final = maestro.id_concepto_maestro
+
+            nuevo = ObraConceptos(
                 id_obra=id_obra,
+                id_concepto_maestro=id_maestro_final,
                 id_tipo_concepto=tipo_ord.id_tipo_concepto if tipo_ord else 1,
-                id_unidad=item.id_unidad,
-                id_subpartida=id_sub,
-                clave_concepto=item.clave_concepto.strip().upper(),
-                descripcion=item.descripcion.strip(),
                 cantidad_presupuestada=item.cantidad_presupuestada,
                 cantidad_adicional_autorizada=Decimal("0.00"),
                 precio_unitario=item.precio_unitario,
@@ -557,7 +954,7 @@ class CatalogoConceptosService:
         contenido_archivo: bytes,
         nombre_archivo: str,
         nombre_hoja: Optional[str] = None
-    ) -> List[models.ConceptoCatalogoPublic]:
+    ) -> models.ImportacionExcelObraPublic:
         """
         RN-SUPT-01.4 y RN-SUPT-01.5: Importa el catálogo de conceptos directamente desde un archivo
         Excel (.xlsx) con formato de presupuesto por obra (Partida, Subpartida, Clave, Descripción,
@@ -629,11 +1026,6 @@ class CatalogoConceptosService:
                 )
             )
 
-        unidades_db = list(
-            session.exec(select(CatUnidadesMedida).where(col(CatUnidadesMedida.activo).is_(True))).all()
-        )
-        mapa_unidades_id = {u.clave.upper(): u.id_unidad for u in unidades_db}
-
         conceptos_parseados: List[models.ConceptoCatalogoCreate] = []
         for row_idx in range(fila_encabezado + 1, ws.max_row + 1):
             clave_val = ws.cell(row_idx, indices["clave"]).value
@@ -652,17 +1044,8 @@ class CatalogoConceptosService:
                 if "subpartida" in indices else "GENERAL"
             )
             desc_val = str(ws.cell(row_idx, indices["descripcion"]).value or "").strip()
-            unidad_raw = str(ws.cell(row_idx, indices["unidad"]).value or "").strip().upper()
-            clave_unidad = MAPA_UNIDADES_EXCEL.get(unidad_raw, unidad_raw)
-
-            if clave_unidad not in mapa_unidades_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Fila {row_idx}: La unidad '{unidad_raw}' (normalizada a '{clave_unidad}') "
-                        f"no existe activa en Cat_Unidades_Medida."
-                    )
-                )
+            unidad_raw = str(ws.cell(row_idx, indices["unidad"]).value or "").strip()
+            unidad_obj = CatalogoConceptosService._resolver_o_crear_unidad(session, unidad_raw)
 
             try:
                 cant_dec = Decimal(str(ws.cell(row_idx, indices["cantidad"]).value))
@@ -676,7 +1059,7 @@ class CatalogoConceptosService:
             conceptos_parseados.append(
                 models.ConceptoCatalogoCreate(
                     id_obra=id_obra,
-                    id_unidad=mapa_unidades_id[clave_unidad],
+                    id_unidad=unidad_obj.id_unidad,
                     partida=partida_val,
                     subpartida=subpartida_val,
                     clave_concepto=str(clave_val).strip().upper(),
@@ -692,7 +1075,35 @@ class CatalogoConceptosService:
                 detail="No se encontraron renglones de conceptos válidos en la hoja seleccionada."
             )
 
-        return CatalogoConceptosService.cargar_conceptos_ordinarios(session, conceptos_parseados)
+        claves_excel = {
+            c.clave_concepto.strip().upper()
+            for c in conceptos_parseados
+            if c.clave_concepto
+        }
+        claves_existentes_maestro = (
+            {
+                m.clave_concepto.upper()
+                for m in session.exec(
+                    select(CatConceptosMaestro).where(
+                        col(CatConceptosMaestro.clave_concepto).in_(claves_excel)
+                    )
+                ).all()
+            }
+            if claves_excel
+            else set()
+        )
+        reutilizados_maestro = sum(1 for cl in claves_excel if cl in claves_existentes_maestro)
+        nuevos_en_maestro = len(claves_excel) - reutilizados_maestro
+
+        creados = CatalogoConceptosService.cargar_conceptos_ordinarios(
+            session, conceptos_parseados, id_obra_path=id_obra
+        )
+        return models.ImportacionExcelObraPublic(
+            reutilizados_maestro=reutilizados_maestro,
+            nuevos_en_maestro=nuevos_en_maestro,
+            vinculados_a_obra=len(creados),
+            conceptos=creados,
+        )
 
     @staticmethod
     def obtener_resumen_por_partidas(
@@ -705,9 +1116,9 @@ class CatalogoConceptosService:
         obra = ObraContratoService.obtener_obra(session, id_obra)
         conceptos = list(
             session.exec(
-                select(ConceptosCatalogo)
-                .where(ConceptosCatalogo.id_obra == id_obra)
-                .order_by(col(ConceptosCatalogo.id_concepto).asc())
+                select(ObraConceptos)
+                .where(ObraConceptos.id_obra == id_obra)
+                .order_by(col(ObraConceptos.id_obra_concepto).asc())
             ).all()
         )
 
@@ -715,7 +1126,8 @@ class CatalogoConceptosService:
         total_calc = Decimal("0.00")
 
         for c in conceptos:
-            sub = session.get(CatSubpartidas, c.id_subpartida)
+            maestro = session.get(CatConceptosMaestro, c.id_concepto_maestro)
+            sub = session.get(CatSubpartidas, maestro.id_subpartida) if maestro else None
             part = session.get(CatPartidas, sub.id_partida) if sub else None
             nombre_part = part.nombre if part else "GENERAL"
             nombre_sub = sub.nombre if sub else "GENERAL"
@@ -767,9 +1179,9 @@ class CatalogoConceptosService:
 
     @staticmethod
     def editar_concepto_ordinario(
-        session: Session, id_concepto: int, concepto_in: models.ConceptoCatalogoUpdate
+        session: Session, id_obra_concepto: int, concepto_in: models.ConceptoCatalogoUpdate
     ) -> models.ConceptoCatalogoPublic:
-        concepto = session.get(ConceptosCatalogo, id_concepto)
+        concepto = session.get(ObraConceptos, id_obra_concepto)
         if not concepto:
             raise HTTPException(status_code=404, detail="Concepto no encontrado.")
 
@@ -779,17 +1191,39 @@ class CatalogoConceptosService:
                 detail="RN-SUPT-01.3: Los precios unitarios y volúmenes originales están bloqueados e inmutables."
             )
 
+        maestro = session.get(CatConceptosMaestro, concepto.id_concepto_maestro)
+        if not maestro:
+            raise HTTPException(status_code=404, detail="Concepto maestro asociado no encontrado.")
+
         datos = concepto_in.model_dump(exclude_unset=True)
         nueva_part = datos.pop("partida", None)
         nueva_sub = datos.pop("subpartida", None)
         if nueva_part is not None or nueva_sub is not None:
-            sub_actual = session.get(CatSubpartidas, concepto.id_subpartida)
+            sub_actual = session.get(CatSubpartidas, maestro.id_subpartida)
             part_actual = session.get(CatPartidas, sub_actual.id_partida) if sub_actual else None
             p_final = nueva_part or (part_actual.nombre if part_actual else "GENERAL")
             s_final = nueva_sub or (sub_actual.nombre if sub_actual else "GENERAL")
-            concepto.id_subpartida = CatalogoConceptosService._resolver_o_crear_subpartida(
+            maestro.id_subpartida = CatalogoConceptosService._resolver_o_crear_subpartida(
                 session, p_final, s_final
             )
+
+        if "id_unidad" in datos:
+            maestro.id_unidad = datos.pop("id_unidad")
+        if "clave_concepto" in datos:
+            clave_norm = str(datos.pop("clave_concepto")).strip().upper()
+            if clave_norm != maestro.clave_concepto:
+                duplicada = session.exec(
+                    select(CatConceptosMaestro).where(CatConceptosMaestro.clave_concepto == clave_norm)
+                ).first()
+                if duplicada:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"La clave '{clave_norm}' ya existe en el catálogo maestro."
+                    )
+                maestro.clave_concepto = clave_norm
+        if "descripcion" in datos:
+            maestro.descripcion = str(datos.pop("descripcion")).strip()
+
         for campo, valor in datos.items():
             setattr(concepto, campo, valor)
 
@@ -799,13 +1233,13 @@ class CatalogoConceptosService:
 
         todos = list(
             session.exec(
-                select(ConceptosCatalogo).where(ConceptosCatalogo.id_obra == concepto.id_obra)
+                select(ObraConceptos).where(ObraConceptos.id_obra == concepto.id_obra)
             ).all()
         )
         suma_total = sum(
             (
                 (concepto.cantidad_presupuestada * concepto.precio_unitario)
-                if c.id_concepto == id_concepto
+                if c.id_obra_concepto == id_obra_concepto
                 else (c.cantidad_presupuestada * c.precio_unitario)
                 for c in todos
             ),
@@ -817,13 +1251,14 @@ class CatalogoConceptosService:
                 detail=f"RN-SUPT-01.1: La modificación rebasa el tope presupuestal (${tope:,.2f})."
             )
 
+        session.add(maestro)
         session.add(concepto)
         session.commit()
         session.refresh(concepto)
         return CatalogoConceptosService.enriquecer_concepto(session, concepto)
 
     @staticmethod
-    def inyectar_concepto_extraordinario(
+    def crear_concepto_extraordinario(
         session: Session,
         inyeccion_in: models.ConceptoExtraordinarioInyeccion,
         residente: Usuarios,
@@ -841,9 +1276,11 @@ class CatalogoConceptosService:
 
         clave_norm = inyeccion_in.clave_concepto.strip().upper()
         duplicado = session.exec(
-            select(ConceptosCatalogo).where(
-                ConceptosCatalogo.id_obra == obra.id_obra,
-                ConceptosCatalogo.clave_concepto == clave_norm
+            select(ObraConceptos)
+            .join(CatConceptosMaestro)
+            .where(
+                ObraConceptos.id_obra == obra.id_obra,
+                CatConceptosMaestro.clave_concepto == clave_norm
             )
         ).first()
         if duplicado:
@@ -859,18 +1296,23 @@ class CatalogoConceptosService:
         id_sub_ext = CatalogoConceptosService._resolver_o_crear_subpartida(
             session, inyeccion_in.partida, inyeccion_in.subpartida
         )
-        nuevo_ext = ConceptosCatalogo(
-            id_obra=obra.id_obra,
-            id_tipo_concepto=tipo_ext.id_tipo_concepto if tipo_ext else 2,
-            id_unidad=inyeccion_in.id_unidad,
+        maestro_ext = CatalogoConceptosService._upsert_concepto_maestro(
+            session=session,
             id_subpartida=id_sub_ext,
+            id_unidad=inyeccion_in.id_unidad,
             clave_concepto=clave_norm,
             descripcion=inyeccion_in.descripcion,
+            precio_referencia=inyeccion_in.precio_unitario,
+        )
+        nuevo_ext = ObraConceptos(
+            id_obra=obra.id_obra,
+            id_concepto_maestro=maestro_ext.id_concepto_maestro,
+            id_tipo_concepto=tipo_ext.id_tipo_concepto if tipo_ext else 2,
             cantidad_presupuestada=inyeccion_in.cantidad_presupuestada,
             cantidad_adicional_autorizada=Decimal("0.00"),
             precio_unitario=inyeccion_in.precio_unitario,
             dictamen_apu_url=inyeccion_in.dictamen_apu_url,
-            autorizado_por_residente=True
+            autorizado_por_residente=False
         )
         session.add(nuevo_ext)
         session.commit()
@@ -886,6 +1328,17 @@ class CatalogoConceptosService:
             ip_origen=ip_origen
         )
         return CatalogoConceptosService.enriquecer_concepto(session, nuevo_ext)
+
+    @staticmethod
+    def inyectar_concepto_extraordinario(
+        session: Session,
+        inyeccion_in: models.ConceptoExtraordinarioInyeccion,
+        residente: Usuarios,
+        ip_origen: str
+    ) -> models.ConceptoCatalogoPublic:
+        return CatalogoConceptosService.crear_concepto_extraordinario(
+            session, inyeccion_in, residente, ip_origen
+        )
 
 
 # ==========================================
